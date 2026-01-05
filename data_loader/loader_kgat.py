@@ -88,7 +88,7 @@ class DataLoaderKGAT(DataLoaderBase):
         i = torch.LongTensor(indices)
         v = torch.FloatTensor(values)
         shape = coo.shape
-        return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+        return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
 
     def create_adjacency_dict(self):

@@ -57,7 +57,7 @@ class DataLoaderNFM(DataLoaderBase):
         i = torch.LongTensor(indices)
         v = torch.FloatTensor(values)
         shape = coo.shape
-        return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+        return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
 
     def generate_train_batch(self, user_dict):

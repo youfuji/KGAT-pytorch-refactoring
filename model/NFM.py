@@ -105,7 +105,7 @@ class NFM(nn.Module):
         pos_scores = self.calc_score(pos_feature_values)            # (batch_size)
         neg_scores = self.calc_score(neg_feature_values)            # (batch_size)
 
-        loss = (-1.0) * torch.log(1e-10 + F.sigmoid(pos_scores - neg_scores))
+        loss = (-1.0) * torch.log(1e-10 + torch.sigmoid(pos_scores - neg_scores))
         loss = torch.mean(loss)
 
         l2_loss = torch.norm(self.h.weight, 2).pow(2) / 2

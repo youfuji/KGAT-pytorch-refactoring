@@ -108,7 +108,7 @@ class KGAT(nn.Module):
         for k in range(self.n_layers):
             self.aggregator_layers.append(Aggregator(self.conv_dim_list[k], self.conv_dim_list[k + 1], self.mess_dropout[k], self.aggregation_type))
 
-        self.A_in = nn.Parameter(torch.sparse.FloatTensor(self.n_users + self.n_entities, self.n_users + self.n_entities))
+        self.A_in = nn.Parameter(torch.sparse_coo_tensor(self.n_users + self.n_entities, self.n_users + self.n_entities))
         if A_in is not None:
             self.A_in.data = A_in
         self.A_in.requires_grad = False
@@ -222,7 +222,7 @@ class KGAT(nn.Module):
 
         indices = torch.stack([rows, cols])
         shape = self.A_in.shape
-        A_in = torch.sparse.FloatTensor(indices, values, torch.Size(shape))
+        A_in = torch.sparse_coo_tensor(indices, values, torch.Size(shape))
 
         # Equation (5)
         A_in = torch.sparse.softmax(A_in.cpu(), dim=1)

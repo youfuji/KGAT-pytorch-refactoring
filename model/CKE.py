@@ -106,7 +106,7 @@ class CKE(nn.Module):
         pos_score = torch.sum(user_embed * item_pos_cf_embed, dim=1)    # (cf_batch_size)
         neg_score = torch.sum(user_embed * item_neg_cf_embed, dim=1)    # (cf_batch_size)
 
-        cf_loss = (-1.0) * torch.log(1e-10 + F.sigmoid(pos_score - neg_score))
+        cf_loss = (-1.0) * torch.log(1e-10 + torch.sigmoid(pos_score - neg_score))
         cf_loss = torch.mean(cf_loss)
 
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(item_pos_cf_embed) + _L2_loss_mean(item_neg_cf_embed)
