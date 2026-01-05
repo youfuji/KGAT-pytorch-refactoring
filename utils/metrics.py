@@ -45,7 +45,7 @@ def dcg_at_k(rel, k):
     calculate discounted cumulative gain (dcg)
     rel: list, element is positive real values, can be binary
     """
-    rel = np.asfarray(rel)[:k]
+    rel = np.asarray(rel, dtype=np.float64)[:k]
     dcg = np.sum((2 ** rel - 1) / np.log2(np.arange(2, rel.size + 2)))
     return dcg
 
@@ -82,7 +82,7 @@ def recall_at_k(hit, k, all_pos_num):
     calculate Recall@k
     hit: list, element is binary (0 / 1)
     """
-    hit = np.asfarray(hit)[:k]
+    hit = np.asarray(hit, dtype=np.float64)[:k]
     return np.sum(hit) / all_pos_num
 
 
