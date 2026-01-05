@@ -108,9 +108,12 @@ class KGAT(nn.Module):
         for k in range(self.n_layers):
             self.aggregator_layers.append(Aggregator(self.conv_dim_list[k], self.conv_dim_list[k + 1], self.mess_dropout[k], self.aggregation_type))
 
-        self.A_in = nn.Parameter(torch.sparse_coo_tensor(self.n_users + self.n_entities, self.n_users + self.n_entities))
         if A_in is not None:
-            self.A_in.data = A_in
+            self.A_in = nn.Parameter(A_in)
+        else:
+            indices = torch.tensor([[], []], dtype=torch.long)
+            values = torch.tensor([], dtype=torch.float)
+            self.A_in = nn.Parameter(torch.sparse_coo_tensor(indices, values, (self.n_users + self.n_entities, self.n_users + self.n_entities)))
         self.A_in.requires_grad = False
 
 

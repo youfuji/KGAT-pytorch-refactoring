@@ -105,7 +105,8 @@ class DataLoaderKGAT(DataLoaderBase):
         def symmetric_norm_lap(adj):
             rowsum = np.array(adj.sum(axis=1))
 
-            d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+            with np.errstate(divide='ignore'):
+                d_inv_sqrt = np.power(rowsum, -0.5).flatten()
             d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0
             d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
 
@@ -115,7 +116,8 @@ class DataLoaderKGAT(DataLoaderBase):
         def random_walk_norm_lap(adj):
             rowsum = np.array(adj.sum(axis=1))
 
-            d_inv = np.power(rowsum, -1.0).flatten()
+            with np.errstate(divide='ignore'):
+                d_inv = np.power(rowsum, -1.0).flatten()
             d_inv[np.isinf(d_inv)] = 0
             d_mat_inv = sp.diags(d_inv)
 
