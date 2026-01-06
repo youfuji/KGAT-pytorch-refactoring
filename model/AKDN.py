@@ -12,6 +12,7 @@ class AKDN(nn.Module):
         self.n_entities = n_entities
         self.n_relations = n_relations
         self.embed_dim = args.embed_dim
+        self.relation_dim = args.relation_dim
         
         # LightGCN (IG側) の設定
         self.n_layers = len(eval(args.conv_dim_list))
@@ -21,7 +22,7 @@ class AKDN(nn.Module):
         # 0 ~ n_entities-1 : Entities (Items含む)
         # n_entities ~ end : Users
         self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.embed_dim)
-        self.relation_embed = nn.Embedding(self.n_relations, self.embed_dim)
+        self.relation_embed = nn.Embedding(self.n_relations, self.relation_dim)
         
         # 初期化 (Xavier)
         nn.init.xavier_uniform_(self.entity_user_embed.weight)
@@ -42,7 +43,7 @@ class AKDN(nn.Module):
         
         # 1. KG Attention用パラメータ (Eq. 2)
         # W_k: (d || d) -> d  (連結を入力とする)
-        self.W_k = nn.Linear(self.embed_dim * 2, self.embed_dim)
+        self.W_k = nn.Linear(self.embed_dim * 2, self.relation_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
         
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -215,7 +216,8 @@ class AKDN(nn.Module):
             
             # 入力ベクトルの結合: [Users, Dual Items]
             # ※ e_items_dualを使うのが重要 (Userへのフィードバック)
-            ig_input = torch.cat([e_items_dual, e_users_curr], dim=0) # shape順序に注意: A_inの作成順に合わせる
+            # 入力ベクトルの結合: [Users, Dual Items]
+            # ※ e_items_dualを使うのが重要 (Userへのフィードバック)
             
             # A_inは (n_users + n_entities) x (n_users + n_entities)
             # 以前のLoaderでは Userが先かEntityが先か要確認。
