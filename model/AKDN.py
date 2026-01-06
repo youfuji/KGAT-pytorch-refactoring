@@ -209,20 +209,6 @@ class AKDN(nn.Module):
             #   Top part (User更新): R * e_items_dual -> Dual Itemから集約 (Eq. 6 準拠)
             #   Bottom part (Item更新): R^T * e_users_curr -> Userから集約 (Eq. 3 準拠)
             # -----------------------------------------------------
-            
-            # 入力ベクトルの結合: [Users, Dual Items]
-            # ※ e_items_dualを使うのが重要 (Userへのフィードバック)
-            # 入力ベクトルの結合: [Users, Dual Items]
-            # ※ e_items_dualを使うのが重要 (Userへのフィードバック)
-            
-            # A_inは (n_users + n_entities) x (n_users + n_entities)
-            # 以前のLoaderでは Userが先かEntityが先か要確認。
-            # LoaderAKDNの `create_ig_adjacency` を見ると:
-            # rows (User), cols (Item/Entity) -> shape=(n_users+n_entities)
-            # 通常、IDは 0~n_ent-1 (Entity), n_ent~ (User) なので、
-            # 行列のインデックス順は [Entity, User] の順になっているはずです。
-            # よって、結合順序は [Entities(Dual), Users] が正しい。
-            
             ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
             
             # 伝播
@@ -250,8 +236,6 @@ class AKDN(nn.Module):
             e_users_curr = e_users_new
             
             # Entity更新 (KG側)
-            # AKDNはItem表現に注力しているが、多層にするならEntityも更新が必要
-            # ここではシンプルに KG Aggregationの結果を次のEntity表現とする(Item兼Entityとして)
             e_entities_curr = e_items_kg 
             
             # -----------------------------------------------------
@@ -260,11 +244,9 @@ class AKDN(nn.Module):
             # KGAT同様、各層の出力に対してDropoutを適用
             if self.mess_dropout[i] > 0.0:
                  # リスト内のTensorであれば個別に、単体であればそのまま適用
-                 # ここでは e_items_collab (Item) と e_users_new (User) がメインの学習対象
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
                  e_items_dual = F.dropout(e_items_dual, p=self.mess_dropout[i], training=self.training)
-                 # e_entities_curr にも適用するかは選択によるが、Item側と合わせるのが自然
                  e_entities_curr = F.dropout(e_entities_curr, p=self.mess_dropout[i], training=self.training)
                  
                  # list内の最後の要素をDropout済みのものに更新 (既にappend済みのため)
@@ -277,9 +259,6 @@ class AKDN(nn.Module):
         user_final = torch.stack(user_embeds_list, dim=1).sum(dim=1)
         
         # User, Item の順で結合して返す (他のメソッドとの整合性のため)
-        # ただし、IDのマッピングに注意。
-        # 呼び出し元は all_embed[user_id] (user_id >= n_entities) とする想定が多い
-        # ここでは [Item_Final, User_Final] の形で結合して返す
         return torch.cat([item_final, user_final], dim=0)
 
     def forward(self, mode, *input):
