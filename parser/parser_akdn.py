@@ -7,7 +7,7 @@ def parse_akdn_args():
     parser.add_argument('--seed', type=int, default=2019,
                         help='Random seed.')
 
-    parser.add_argument('--data_name', nargs='?', default='amazon-book',
+    parser.add_argument('--data_name', nargs='?', default='yelp2018',
                         help='Choose a dataset from {yelp2018, last-fm, amazon-book}')
     parser.add_argument('--data_dir', nargs='?', default='datasets/',
                         help='Input data path.')
@@ -31,9 +31,9 @@ def parse_akdn_args():
     parser.add_argument('--relation_dim', type=int, default=64,
                         help='Relation Embedding size.')
 
-    parser.add_argument('--conv_dim_list', nargs='?', default='[64, 32, 16]',
+    parser.add_argument('--conv_dim_list', nargs='?', default='[64, 64]',
                         help='Output sizes of every aggregation layer.')
-    parser.add_argument('--mess_dropout', nargs='?', default='[0.1, 0.1, 0.1]',
+    parser.add_argument('--mess_dropout', nargs='?', default='[0.5, 0.5]',
                         help='Dropout probability w.r.t. message dropout for each deep layer. 0: no dropout.')
 
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5,
@@ -51,7 +51,7 @@ def parse_akdn_args():
     parser.add_argument('--evaluate_every', type=int, default=10,
                         help='Epoch interval of evaluating CF.')
 
-    parser.add_argument('--Ks', nargs='?', default='[20, 40, 60, 80, 100]',
+    parser.add_argument('--Ks', nargs='?', default='[20]',
                         help='Calculate metric@K when evaluating.')
 
     args = parser.parse_args()
