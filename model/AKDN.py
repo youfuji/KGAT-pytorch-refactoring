@@ -82,7 +82,6 @@ class AKDN(nn.Module):
         trans_embed = self.W_k(cat_embed)
         
         # 3. Relation-aware Interaction (Element-wise Product & Sum)
-        # ここで LeakyReLU の前に r との積をとるのが論文の式
         # (W_k[...] * r) -> sum -> scalar
         product = trans_embed * r
         attention_logits = torch.sum(product, dim=1)
