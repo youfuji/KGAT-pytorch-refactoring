@@ -42,8 +42,8 @@ class AKDN(nn.Module):
             self.entity_user_embed.weight.data[self.n_entities : self.n_entities + self.n_users].copy_(user_pre_embed)
         
         # 1. KG Attention用パラメータ (Eq. 2)
-        # W_k: (d) -> k  (要素ごとの積を入力とする)
-        self.W_k = nn.Linear(self.embed_dim, self.relation_dim)
+        # W_k: (d || d) -> d  (連結を入力とする)
+        self.W_k = nn.Linear(self.embed_dim * 2, self.relation_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
         
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -74,9 +74,9 @@ class AKDN(nn.Module):
         t: Tail entities (Batch, dim)
         r: Relations (Batch, dim)
         """
-        # 1. Element-wise Product of Head & Tail [e_v * e_i] -> (Batch, dim)
+        # 1. Concatenate Head & Tail [e_v || e_i] -> (Batch, 2*dim)
         # 実装上の注意: t(tail/neighbor)が e_v, h(head/self)が e_i に相当
-        cat_embed = t * h
+        cat_embed = torch.cat([t, h], dim=1)
         
         # 2. Linear Transform W_k -> (Batch, dim)
         trans_embed = self.W_k(cat_embed)
