@@ -26,6 +26,17 @@ class AKDN(nn.Module):
         # 初期化 (Xavier)
         nn.init.xavier_uniform_(self.entity_user_embed.weight)
         nn.init.xavier_uniform_(self.relation_embed.weight)
+
+        # 事前学習済み埋め込みのロード
+        if (user_pre_embed is not None) and (item_pre_embed is not None):
+            # Item Part (0 ~ n_items)
+            # 事前学習データ(MF)は通常アイテムのみの埋め込みを持つため、対応するID部分のみ更新
+            n_pre_items = item_pre_embed.shape[0]
+            self.entity_user_embed.weight.data[:n_pre_items].copy_(item_pre_embed)
+            
+            # User Part (n_entities ~ )
+            # ユーザーIDは n_entities から始まるため、そこから user_pre_embed の分だけ更新
+            self.entity_user_embed.weight.data[self.n_entities : self.n_entities + self.n_users].copy_(user_pre_embed)
         
         # --- AKDN Specific Parameters ---
         

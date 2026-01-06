@@ -2,6 +2,7 @@ import os
 import sys
 import random
 from time import time
+import logging
 
 import pandas as pd
 import numpy as np
@@ -42,7 +43,7 @@ def evaluate(model, dataloader, Ks, device):
 
             with torch.no_grad():
                 # mode='calc_score' (AKDN.pyの実装に合わせる)
-                batch_scores = model(mode='calc_score', user_ids=batch_user_ids, item_ids=item_ids)
+                batch_scores = model('calc_score', batch_user_ids, item_ids)
 
             batch_scores = batch_scores.cpu()
             batch_metrics = calc_metrics_at_k(batch_scores, train_user_dict, test_user_dict, batch_user_ids.cpu().numpy(), item_ids.cpu().numpy(), Ks)
@@ -128,7 +129,7 @@ def train(args):
         relations = list(data.train_relation_dict.keys())
         
         with torch.no_grad(): # Attention更新自体は勾配計算しない（パラメータ更新はCF Lossで行う）
-            model(mode='update_att', h_list=h_list, t_list=t_list, r_list=r_list, relations=relations)
+            model('update_att', h_list, t_list, r_list, relations)
         
         logging.info('Update Attention: Epoch {:04d} | Total Time {:.1f}s'.format(epoch, time() - time_att))
 
@@ -147,7 +148,7 @@ def train(args):
             cf_batch_neg_item = cf_batch_neg_item.to(device)
 
             # AKDN.py の calc_loss を呼び出し
-            batch_loss = model(mode='calc_loss', user_ids=cf_batch_user, item_pos_ids=cf_batch_pos_item, item_neg_ids=cf_batch_neg_item)
+            batch_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
 
             if np.isnan(batch_loss.cpu().detach().numpy()):
                 logging.info('ERROR (CF Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_batch))
