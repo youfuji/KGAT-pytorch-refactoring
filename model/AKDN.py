@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def _L2_loss_mean(x):
+    return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
+
 class AKDN(nn.Module):
     def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
                  user_pre_embed=None, item_pre_embed=None):   
@@ -324,11 +327,8 @@ class AKDN(nn.Module):
         pos_scores = torch.sum(user_embed * pos_embed, dim=1)
         neg_scores = torch.sum(user_embed * neg_embed, dim=1)
         
-        loss = torch.mean(F.softplus(neg_scores - pos_scores))
+        cf_loss = torch.mean(F.softplus(neg_scores - pos_scores))
         
         # L2 Regularization (Eq. 10)
-        l2_loss = (user_embed.norm(2).pow(2) + 
-                   pos_embed.norm(2).pow(2) + 
-                   neg_embed.norm(2).pow(2)) / 2
-                   
-        return loss + 1e-5 * l2_loss
+        l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
+        return cf_loss + self.cf_l2loss_lambda * l2_loss
