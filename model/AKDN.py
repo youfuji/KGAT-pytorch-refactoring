@@ -11,20 +11,18 @@ class AKDN(nn.Module):
         super(AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
 
-        # --- 基本設定 ---
         self.n_users = n_users
         self.n_entities = n_entities
         self.n_relations = n_relations
+
         self.embed_dim = args.embed_dim
         self.relation_dim = args.relation_dim
         
-        # LightGCN (IG側) の設定
-        self.n_layers = len(eval(args.conv_dim_list))
         self.mess_dropout = eval(args.mess_dropout)
+        self.n_layers = len(eval(args.conv_dim_list))
+
+        self.cf_l2loss_lambda = args.cf_l2loss_lambda
         
-        # --- Embedding Layers ---
-        # 0 ~ n_entities-1 : Entities (Items含む)
-        # n_entities ~ end : Users
         self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.embed_dim)
         self.relation_embed = nn.Embedding(self.n_relations, self.relation_dim)
         
@@ -43,11 +41,9 @@ class AKDN(nn.Module):
             # ユーザーIDは n_entities から始まるため、そこから user_pre_embed の分だけ更新
             self.entity_user_embed.weight.data[self.n_entities : self.n_entities + self.n_users].copy_(user_pre_embed)
         
-        # --- AKDN Specific Parameters ---
-        
         # 1. KG Attention用パラメータ (Eq. 2)
-        # W_k: (d || d) -> d  (連結を入力とする)
-        self.W_k = nn.Linear(self.embed_dim * 2, self.relation_dim)
+        # W_k: (d) -> k  (要素ごとの積を入力とする)
+        self.W_k = nn.Linear(self.embed_dim, self.relation_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
         
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -57,9 +53,6 @@ class AKDN(nn.Module):
         nn.init.xavier_uniform_(self.W_a.weight)
         nn.init.xavier_uniform_(self.W_b.weight)
         
-        # Note: Calibration Layerは論文に存在しないため削除
-        
-        # --- Graph Structure ---
         # IG用隣接行列 (LightGCN用, User-Item Bipartite)
         if A_in is not None:
             self.A_in = nn.Parameter(A_in)
@@ -75,15 +68,15 @@ class AKDN(nn.Module):
     def calc_kg_attention(self, h, t, r):
         """
         KG側のAttentionスコアを計算 (Eq. 2 準拠)
-        alpha = softmax( LeakyReLU( sum( (W_k[e_v||e_i]) * r ) ) )
+        alpha = softmax( LeakyReLU( sum( (W_k[e_v * e_i]) * r ) ) )
         
         h: Head items (Batch, dim)
         t: Tail entities (Batch, dim)
         r: Relations (Batch, dim)
         """
-        # 1. Concatenate Head & Tail [e_v || e_i] -> (Batch, 2*dim)
+        # 1. Element-wise Product of Head & Tail [e_v * e_i] -> (Batch, dim)
         # 実装上の注意: t(tail/neighbor)が e_v, h(head/self)が e_i に相当
-        cat_embed = torch.cat([t, h], dim=1)
+        cat_embed = t * h
         
         # 2. Linear Transform W_k -> (Batch, dim)
         trans_embed = self.W_k(cat_embed)
