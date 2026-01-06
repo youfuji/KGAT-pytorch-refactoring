@@ -159,13 +159,44 @@ class AKDN(nn.Module):
         fused_embed = g * kg_embed + (1 - g) * ig_embed
         return fused_embed
 
+    def _kg_aggregation(self, e_entities_curr):
+        """
+        KG Aggregation (Eq. 1)
+        \hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
+        """
+        if self.A_kg is not None:
+            # Sparse MM: (n_ent, n_ent) x (n_ent, dim) -> (n_ent, dim)
+            e_items_kg = torch.sparse.mm(self.A_kg, e_entities_curr)
+        else:
+            e_items_kg = e_entities_curr # Fallback
+        return e_items_kg
+
+    def _ig_aggregation(self, e_items_dual, e_users_curr):
+        """
+        IG Aggregation (Eq. 3 & Eq. 6)
+        User Updating: Eq. 6 (Aggregation from Dual Item)
+        Item Updating: Eq. 3 (Aggregation from User)
+        """
+        # 入力ベクトルの結合: [Entities(Dual), Users]
+        # 注意: 行列 A_in のインデックス順序は [Entities, Users]
+        ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
+        
+        # 伝播
+        ig_output = torch.sparse.mm(self.A_in, ig_input_ordered)
+        
+        # 出力の分離
+        e_items_collab = ig_output[:self.n_entities] # Item (Collaborative) \tilde{e}
+        e_users_new = ig_output[self.n_entities:]    # User (Updated)
+        
+        return e_items_collab, e_users_new
+
     def get_embeddings(self):
         """
         AKDNのメインループ (L層の伝播と融合)
         Eq. 1, 3, 4, 5, 6 を忠実に実装
+        Refactored version: Aggregation logic is separated into helper methods.
         """
         # 初期Embedding (Layer 0)
-        # entity_user_embed: [0...n_entities-1] are entities/items, [n_entities...end] are users
         all_embed = self.entity_user_embed.weight
         
         # 分離
@@ -173,55 +204,22 @@ class AKDN(nn.Module):
         e_users = all_embed[self.n_entities:]
         
         # 最終的な表現を格納するリスト (Eq. 7: sum of all layers)
-        # 注意: 論文では「collaborative item representation」を使うとあるので、
-        # IG由来の表現を蓄積する。Userも同様。
         user_embeds_list = [e_users]
-        item_collab_embeds_list = [e_entities] # Layer 0のitemはIG/KG区別なし
+        item_collab_embeds_list = [e_entities] 
         
-        # 現在の「Dual Item Representation」 (初期値はそのまま)
-        # これは次の層への入力(Userへの伝播)に使われる
+        # 現在の「Dual Item Representation」 & User & Entity
         e_items_dual = e_entities
-        
-        # 現在のUser表現
         e_users_curr = e_users
-        
-        # 現在のEntity表現 (KG伝播用)
-        # 論文では「recursively obtaining... from KG」とあるのでEntityも更新されると解釈
         e_entities_curr = e_entities
 
         for i in range(self.n_layers):
-            # -----------------------------------------------------
-            # 1. KG Aggregation (Eq. 1) -> Knowledge-aware Item Rep
-            # \hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
-            # -----------------------------------------------------
-            if self.A_kg is not None:
-                # Sparse MM: (n_ent, n_ent) x (n_ent, dim) -> (n_ent, dim)
-                e_items_kg = torch.sparse.mm(self.A_kg, e_entities_curr)
-            else:
-                e_items_kg = e_entities_curr # Fallback
+            # 1. KG Aggregation (Eq. 1)
+            e_items_kg = self._kg_aggregation(e_entities_curr)
 
-            # -----------------------------------------------------
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
-            # ここでテクニックを使用: LightGCNの行列 A_in を使って同時に更新
-            # A_in = [ 0   R ]
-            #        [ R^T 0 ]
-            # 入力ベクトルを [e_users_curr, e_items_dual] と構成することで:
-            #   Top part (User更新): R * e_items_dual -> Dual Itemから集約 (Eq. 6 準拠)
-            #   Bottom part (Item更新): R^T * e_users_curr -> Userから集約 (Eq. 3 準拠)
-            # -----------------------------------------------------
-            ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
+            e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
             
-            # 伝播
-            ig_output = torch.sparse.mm(self.A_in, ig_input_ordered)
-            
-            # 出力の分離
-            e_items_collab = ig_output[:self.n_entities] # Item (Collaborative) \tilde{e}
-            e_users_new = ig_output[self.n_entities:]    # User (Updated)
-            
-            # -----------------------------------------------------
-            # 3. Fusion Gate (Eq. 4, 5) -> Dual Item Rep
-            # アイテム部分のみに適用
-            # -----------------------------------------------------
+            # 3. Fusion Gate (Eq. 4, 5)
             e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
             
             # -----------------------------------------------------
@@ -238,27 +236,20 @@ class AKDN(nn.Module):
             # Entity更新 (KG側)
             e_entities_curr = e_items_kg 
             
-            # -----------------------------------------------------
             # 4. Message Dropout
-            # -----------------------------------------------------
-            # KGAT同様、各層の出力に対してDropoutを適用
             if self.mess_dropout[i] > 0.0:
                  # リスト内のTensorであれば個別に、単体であればそのまま適用
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
-                 e_items_dual = F.dropout(e_items_dual, p=self.mess_dropout[i], training=self.training)
-                 e_entities_curr = F.dropout(e_entities_curr, p=self.mess_dropout[i], training=self.training)
                  
-                 # list内の最後の要素をDropout済みのものに更新 (既にappend済みのため)
+                 # Dropout後の値をリストに再適用
                  item_collab_embeds_list[-1] = e_items_collab
                  user_embeds_list[-1] = e_users_new 
 
         # 最終表現 (Eq. 7)
-        # collaborative item representation obtained from IG as final item representation
         item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)
         user_final = torch.stack(user_embeds_list, dim=1).sum(dim=1)
         
-        # User, Item の順で結合して返す (他のメソッドとの整合性のため)
         return torch.cat([item_final, user_final], dim=0)
 
     def forward(self, mode, *input):
@@ -271,16 +262,6 @@ class AKDN(nn.Module):
 
     def calc_score(self, user_ids, item_ids):
         all_embed = self.get_embeddings()
-        
-        # IDのマッピングに注意
-        # user_ids は Loader で既に +n_entities されている
-        # item_ids は 0 ~ n_entities-1
-        # get_embeddings の戻り値は [Entities(0~N-1), Users(N~)] の順
-        
-        # 念のためインデックス調整 (もしLoaderのIDがずれていれば)
-        # LoaderAKDNでは: cf_train_dataのUser ID += n_entities 済み。
-        # よってそのままアクセス可能。
-        
         user_embed = all_embed[user_ids] 
         item_embed = all_embed[item_ids]
         
