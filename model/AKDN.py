@@ -4,9 +4,10 @@ import torch.nn.functional as F
 
 class AKDN(nn.Module):
     def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
-                 user_pre_embed=None, item_pre_embed=None):
+                 user_pre_embed=None, item_pre_embed=None):   
         super(AKDN, self).__init__()
-        
+        self.use_pretrain = args.use_pretrain
+
         # --- 基本設定 ---
         self.n_users = n_users
         self.n_entities = n_entities
@@ -257,6 +258,23 @@ class AKDN(nn.Module):
             # AKDNはItem表現に注力しているが、多層にするならEntityも更新が必要
             # ここではシンプルに KG Aggregationの結果を次のEntity表現とする(Item兼Entityとして)
             e_entities_curr = e_items_kg 
+            
+            # -----------------------------------------------------
+            # 4. Message Dropout
+            # -----------------------------------------------------
+            # KGAT同様、各層の出力に対してDropoutを適用
+            if self.mess_dropout[i] > 0.0:
+                 # リスト内のTensorであれば個別に、単体であればそのまま適用
+                 # ここでは e_items_collab (Item) と e_users_new (User) がメインの学習対象
+                 e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
+                 e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
+                 e_items_dual = F.dropout(e_items_dual, p=self.mess_dropout[i], training=self.training)
+                 # e_entities_curr にも適用するかは選択によるが、Item側と合わせるのが自然
+                 e_entities_curr = F.dropout(e_entities_curr, p=self.mess_dropout[i], training=self.training)
+                 
+                 # list内の最後の要素をDropout済みのものに更新 (既にappend済みのため)
+                 item_collab_embeds_list[-1] = e_items_collab
+                 user_embeds_list[-1] = e_users_new 
 
         # 最終表現 (Eq. 7)
         # collaborative item representation obtained from IG as final item representation
