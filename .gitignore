@@ -8,8 +8,8 @@ datasets/yelp2018/_rel_ecount
 *.pyc
 __pycache__
 trained_model/
-build_docker.sh
-run_docker.sh
-Dockerfile
-README_DOCKER.md
-requirements.txt
+# build_docker.sh
+# run_docker.sh
+# Dockerfile
+# README_DOCKER.md
+# requirements.txt
