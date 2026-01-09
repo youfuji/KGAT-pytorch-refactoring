@@ -34,6 +34,9 @@ def parse_akdn_args():
     parser.add_argument('--mess_dropout', nargs='?', default='[0.1, 0.1]',
                         help='Dropout probability w.r.t. message dropout for each deep layer. 0: no dropout.')
 
+    parser.add_argument('--edge_dropout_rate', type=float, default=0.6,
+                        help='Dropout probability w.r.t. edge dropout for each deep layer. 0: no dropout.')
+
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5,
                         help='Lambda when calculating CF l2 loss.')
 

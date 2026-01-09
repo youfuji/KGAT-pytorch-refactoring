@@ -7,7 +7,7 @@ def _L2_loss_mean(x):
 
 class AKDN(nn.Module):
     def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
-                 user_pre_embed=None, item_pre_embed=None):   
+                 user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
 
@@ -19,6 +19,7 @@ class AKDN(nn.Module):
         self.relation_dim = args.relation_dim
         
         self.mess_dropout = eval(args.mess_dropout)
+        self.edge_dropout_rate = edge_dropout_rate
         self.n_layers = len(eval(args.conv_dim_list))
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
@@ -159,14 +160,36 @@ class AKDN(nn.Module):
         fused_embed = g * kg_embed + (1 - g) * ig_embed
         return fused_embed
 
+    def _sparse_dropout(self, x, rate, noise_shape):
+        """
+        Sparse Tensorに対するDropout
+        """
+        random_tensor = 1 - rate
+        random_tensor += torch.rand(noise_shape).to(x.device)
+        dropout_mask = torch.floor(random_tensor).type(torch.bool)
+        i = x._indices()
+        v = x._values()
+
+        i = i[:, dropout_mask]
+        v = v[dropout_mask]
+
+        out = torch.sparse_coo_tensor(i, v, x.shape).to(x.device)
+        return out * (1. / (1 - rate))
+
     def _kg_aggregation(self, e_entities_curr):
         """
         KG Aggregation (Eq. 1)
         \hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
         """
         if self.A_kg is not None:
+             # Regularization: Edge Dropout (Apply only during training)
+            if self.training and self.edge_dropout_rate > 0.0:
+                 A_kg = self._sparse_dropout(self.A_kg, self.edge_dropout_rate, self.A_kg._nnz())
+            else:
+                 A_kg = self.A_kg
+
             # Sparse MM: (n_ent, n_ent) x (n_ent, dim) -> (n_ent, dim)
-            e_items_kg = torch.sparse.mm(self.A_kg, e_entities_curr)
+            e_items_kg = torch.sparse.mm(A_kg, e_entities_curr)
         else:
             e_items_kg = e_entities_curr # Fallback
         return e_items_kg
@@ -181,8 +204,14 @@ class AKDN(nn.Module):
         # 注意: 行列 A_in のインデックス順序は [Entities, Users]
         ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
         
+        # Regularization: Edge Dropout (Apply only during training)
+        if self.training and self.edge_dropout_rate > 0.0:
+            A_in = self._sparse_dropout(self.A_in, self.edge_dropout_rate, self.A_in._nnz())
+        else:
+            A_in = self.A_in
+
         # 伝播
-        ig_output = torch.sparse.mm(self.A_in, ig_input_ordered)
+        ig_output = torch.sparse.mm(A_in, ig_input_ordered)
         
         # 出力の分離
         e_items_collab = ig_output[:self.n_entities] # Item (Collaborative) \tilde{e}

@@ -90,7 +90,8 @@ def train(args):
     model = AKDN(args, data.n_users, data.n_entities, data.n_relations, 
                  A_in=data.norm_adj_mat, 
                  user_pre_embed=user_pre_embed, 
-                 item_pre_embed=item_pre_embed)
+                 item_pre_embed=item_pre_embed,
+                 edge_dropout_rate=args.edge_dropout_rate)
                  
     if args.use_pretrain == 2:
         model = load_model(model, args.pretrain_model_path)
