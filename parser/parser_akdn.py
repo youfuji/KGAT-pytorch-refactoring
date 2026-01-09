@@ -19,7 +19,7 @@ def parse_akdn_args():
     parser.add_argument('--pretrain_model_path', nargs='?', default='trained_model/model.pth',
                         help='Path of stored model.')
 
-    parser.add_argument('--cf_batch_size', type=int, default=1024,
+    parser.add_argument('--cf_batch_size', type=int, default=4096,
                         help='CF batch size.')
     parser.add_argument('--test_batch_size', type=int, default=10000,
                         help='Test batch size (the user number to test every batch).')
@@ -31,7 +31,7 @@ def parse_akdn_args():
 
     parser.add_argument('--conv_dim_list', nargs='?', default='[64, 64]',
                         help='Output sizes of every aggregation layer.')
-    parser.add_argument('--mess_dropout', nargs='?', default='[0.5, 0.5]',
+    parser.add_argument('--mess_dropout', nargs='?', default='[0.1, 0.1]',
                         help='Dropout probability w.r.t. message dropout for each deep layer. 0: no dropout.')
 
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5,
