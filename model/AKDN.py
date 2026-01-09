@@ -225,26 +225,27 @@ class AKDN(nn.Module):
             # -----------------------------------------------------
             # ストック & 更新
             # -----------------------------------------------------
+            # 4. Message Dropout
+            # 次の層への入力および最終表現のストックに使用する値に対して一貫してDropoutを適用
+            if self.mess_dropout[i] > 0.0:
+                 e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
+                 e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
+                 e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
+                 e_items_kg = F.dropout(e_items_kg, p=self.mess_dropout[i], training=self.training)
+
+            # -----------------------------------------------------
+            # ストック & 更新
+            # -----------------------------------------------------
             # 予測・Loss計算用には IG由来(Collaborative) のItem表現を使う (論文Source 216)
             item_collab_embeds_list.append(e_items_collab)
             user_embeds_list.append(e_users_new)
             
-            # 次の層への入力更新
+            # 次の層への入力更新 (Dropout適用後の値を使用)
             e_items_dual = e_items_dual_new
             e_users_curr = e_users_new
             
             # Entity更新 (KG側)
             e_entities_curr = e_items_kg 
-            
-            # 4. Message Dropout
-            if self.mess_dropout[i] > 0.0:
-                 # リスト内のTensorであれば個別に、単体であればそのまま適用
-                 e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
-                 e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
-                 
-                 # Dropout後の値をリストに再適用
-                 item_collab_embeds_list[-1] = e_items_collab
-                 user_embeds_list[-1] = e_users_new 
 
         # 最終表現 (Eq. 7)
         item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)

@@ -21,8 +21,6 @@ def parse_akdn_args():
 
     parser.add_argument('--cf_batch_size', type=int, default=1024,
                         help='CF batch size.')
-    parser.add_argument('--kg_batch_size', type=int, default=2048,
-                        help='KG batch size.')
     parser.add_argument('--test_batch_size', type=int, default=10000,
                         help='Test batch size (the user number to test every batch).')
 
