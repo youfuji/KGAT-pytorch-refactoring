@@ -15,7 +15,6 @@ class DataLoaderAKDN(DataLoaderBase):
     def __init__(self, args, logging):
         super().__init__(args, logging)
         self.cf_batch_size = args.cf_batch_size
-        self.kg_batch_size = args.kg_batch_size
         self.test_batch_size = args.test_batch_size
 
         kg_data = self.load_kg(self.kg_file)
