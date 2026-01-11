@@ -29,9 +29,9 @@ def parse_akdn_args():
     parser.add_argument('--relation_dim', type=int, default=64,
                         help='Relation Embedding size.')
 
-    parser.add_argument('--conv_dim_list', nargs='?', default='[64, 64]',
+    parser.add_argument('--conv_dim_list', nargs='?', default='[64, 64, 64]',
                         help='Output sizes of every aggregation layer.')
-    parser.add_argument('--mess_dropout', nargs='?', default='[0.1, 0.1]',
+    parser.add_argument('--mess_dropout', nargs='?', default='[0.1, 0.1, 0.1]',
                         help='Dropout probability w.r.t. message dropout for each deep layer. 0: no dropout.')
 
     parser.add_argument('--edge_dropout_rate', type=float, default=0.6,
