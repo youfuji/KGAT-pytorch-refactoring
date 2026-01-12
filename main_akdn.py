@@ -99,6 +99,10 @@ def train(args):
     model.to(device)
     logging.info(model)
 
+    # AKDNのAttention計算用にグラフ構造をセットする (GPU転送後)
+    relations = list(data.train_relation_dict.keys())
+    model.set_kg_structure(data.h_list.to(device), data.t_list.to(device), data.r_list.to(device), relations)
+
     # AKDNはエンドツーエンド学習なので単一のOptimizerを使用
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -119,23 +123,7 @@ def train(args):
         model.train()
 
         # ------------------------------------------------------------------
-        # 1. Update Attention (KG Part)
-        # ------------------------------------------------------------------
-        # エポックの最初に、現在のEmbeddingに基づいてKG側のAttentionスコア(A_kg)を更新します。
-        # これにより、calc_kg_embeddingsで使用される隣接行列がリフレッシュされます。
-        time_att = time()
-        h_list = data.h_list.to(device)
-        t_list = data.t_list.to(device)
-        r_list = data.r_list.to(device)
-        relations = list(data.train_relation_dict.keys())
-        
-        with torch.no_grad(): # Attention更新自体は勾配計算しない（パラメータ更新はCF Lossで行う）
-            model('update_att', h_list, t_list, r_list, relations)
-        
-        logging.info('Update Attention: Epoch {:04d} | Total Time {:.1f}s'.format(epoch, time() - time_att))
-
-        # ------------------------------------------------------------------
-        # 2. Train CF (Main Task)
+        # 1. Train CF (Main Task) with Differentiable Attention
         # ------------------------------------------------------------------
         time_cf = time()
         total_loss = 0

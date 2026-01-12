@@ -92,61 +92,66 @@ class AKDN(nn.Module):
         
         return scores
 
-    def update_attention_batch(self, h_list, t_list, r_idx):
+    def set_kg_structure(self, h_list, t_list, r_list, relations):
         """
-        特定のRelationについてAttentionスコアをバッチ計算
+        KGの構造情報（インデックス）を保存
         """
-        r_embed = self.relation_embed.weight[r_idx] # (dim, )
-        h_embed = self.entity_user_embed.weight[h_list]
-        t_embed = self.entity_user_embed.weight[t_list]
+        self.h_list = h_list
+        self.t_list = t_list
+        # r_listはRelation EmbeddingのLookupに使う
+        self.r_list = r_list
+        self.relations_set = relations
         
-        # Relation embeddingをバッチサイズに合わせて拡張
-        r_embed_batch = r_embed.unsqueeze(0).expand(h_embed.size(0), -1)
+        # Sparse Matrixのインデックスは静的なので事前に構築しておく
+        # rows: h, cols: t
+        # ただし、Attention計算後に値を埋め込むために並びを把握しておく必要がある
+        # ここでは単純化のため、全エッジに対して一括でAttentionを計算する方式をとる
         
-        return self.calc_kg_attention(h_embed, t_embed, r_embed_batch)
+        # エッジ数
+        self.n_edges = len(h_list)
+        
+        # Sparse Matrix用インデックス (2, n_edges)
+        self.kg_indices = torch.stack([h_list, t_list], dim=0)
 
-    def update_attention(self, h_list, t_list, r_list, relations):
+    def _compute_kg_attention(self):
         """
-        Attention重み付き隣接行列 (A_kg) を更新する関数
+        KG Attention (A_kg) を計算 (Differentiable)
+        パラメータ W_k, relation_embed, entity_user_embed の勾配が伝播するように計算を行う
         """
-        device = self.entity_user_embed.weight.device
-        rows = []
-        cols = []
-        values = []
-
-        for r_idx in relations:
-            index_list = (r_list == r_idx).nonzero(as_tuple=True)[0]
-            if len(index_list) == 0: continue
-            
-            batch_h_list = h_list[index_list]
-            batch_t_list = t_list[index_list]
-            
-            # AKDN Attention Score計算
-            batch_v_list = self.update_attention_batch(batch_h_list, batch_t_list, r_idx)
-            
-            rows.append(batch_h_list)
-            cols.append(batch_t_list)
-            values.append(batch_v_list)
-
-        if len(rows) == 0:
-            return
-
-        rows = torch.cat(rows)
-        cols = torch.cat(cols)
-        values = torch.cat(values)
-
-        indices = torch.stack([rows, cols])
-        # KGのサイズは (n_entities, n_entities)
-        shape = (self.n_entities, self.n_entities)
+        # 1. Embedding lookup
+        h_embed = self.entity_user_embed(self.h_list)
+        t_embed = self.entity_user_embed(self.t_list)
+        r_embed = self.relation_embed(self.r_list)
         
-        # Sparse Matrix作成
-        A_kg = torch.sparse_coo_tensor(indices, values, torch.Size(shape)).to(device)
+        # 2. Attention Score (Eq. 2)
+        # alpha = LeakyReLU( W_k([e_t || e_h]) * r ) -> sum
+        # Note: AKDNの実装において、Tailが近傍(neighbors)、Headが中心とする
         
-        # Softmax Normalization (Eq. 2)
-        # 行方向(neighbors of h)で正規化
-        A_kg = torch.sparse.softmax(A_kg, dim=1)
+        # Concatenate: (n_edges, 2 * dim)
+        cat_embed = torch.cat([t_embed, h_embed], dim=1)
         
-        self.A_kg = A_kg
+        # Linear Transform: (n_edges, dim)
+        trans_embed = self.W_k(cat_embed)
+        
+        # Interaction with Relation: (n_edges, dim) -> (n_edges, )
+        attention_logits = torch.sum(trans_embed * r_embed, dim=1)
+        
+        # Activation
+        attention_values = self.leakyrelu(attention_logits)
+        
+        # 3. Create Sparse Matrix & Softmax
+        # Sparse Tensor作成 (Valuesに勾配が乗る)
+        A_kg_unorm = torch.sparse_coo_tensor(self.kg_indices, attention_values, 
+                                             size=(self.n_entities, self.n_entities), 
+                                             device=self.kg_indices.device)
+        
+        # Softmax Normalization (Row-wise)
+        # Note: torch.sparse.softmax は dim=1 (row) に対して正規化を行う
+        A_kg = torch.sparse.softmax(A_kg_unorm, dim=1)
+        
+        return A_kg
+
+
 
     def fusion_gate(self, kg_embed, ig_embed):
         """
@@ -176,22 +181,20 @@ class AKDN(nn.Module):
         out = torch.sparse_coo_tensor(i, v, x.shape).to(x.device)
         return out * (1. / (1 - rate))
 
-    def _kg_aggregation(self, e_entities_curr):
+    def _kg_aggregation(self, A_kg, e_entities_curr):
         """
         KG Aggregation (Eq. 1)
         \hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
         """
-        if self.A_kg is not None:
-             # Regularization: Edge Dropout (Apply only during training)
-            if self.training and self.edge_dropout_rate > 0.0:
-                 A_kg = self._sparse_dropout(self.A_kg, self.edge_dropout_rate, self.A_kg._nnz())
-            else:
-                 A_kg = self.A_kg
-
-            # Sparse MM: (n_ent, n_ent) x (n_ent, dim) -> (n_ent, dim)
-            e_items_kg = torch.sparse.mm(A_kg, e_entities_curr)
+        # Regularization: Edge Dropout (Apply only during training)
+        if self.training and self.edge_dropout_rate > 0.0:
+            A_kg_drop = self._sparse_dropout(A_kg, self.edge_dropout_rate, A_kg._nnz())
         else:
-            e_items_kg = e_entities_curr # Fallback
+            A_kg_drop = A_kg
+
+        # Sparse MM: (n_ent, n_ent) x (n_ent, dim) -> (n_ent, dim)
+        e_items_kg = torch.sparse.mm(A_kg_drop, e_entities_curr)
+        
         return e_items_kg
 
     def _ig_aggregation(self, e_items_dual, e_users_curr):
@@ -225,7 +228,13 @@ class AKDN(nn.Module):
         Eq. 1, 3, 4, 5, 6 を忠実に実装
         Refactored version: Aggregation logic is separated into helper methods.
         """
+        # Step 0: KG Attention Matrixの計算 (Differentiable)
+        # これにより W_k, relation_embed が学習可能になる
+        A_kg = self._compute_kg_attention()
+
         # 初期Embedding (Layer 0)
+        # Note: self.entity_user_embed は _compute_kg_attention ですでに参照されているが、
+        # ここでも伝播の起点として使用する
         all_embed = self.entity_user_embed.weight
         
         # 分離
@@ -237,13 +246,17 @@ class AKDN(nn.Module):
         item_collab_embeds_list = [e_entities] 
         
         # 現在の「Dual Item Representation」 & User & Entity
+        # e_items_dual:  IG入力用 (Fusion後のItem表現)
+        # e_users_curr:  IG入力用 (User表現)
+        # e_entities_curr: KG入力用 (Entity表現)
+        
         e_items_dual = e_entities
         e_users_curr = e_users
         e_entities_curr = e_entities
 
         for i in range(self.n_layers):
             # 1. KG Aggregation (Eq. 1)
-            e_items_kg = self._kg_aggregation(e_entities_curr)
+            e_items_kg = self._kg_aggregation(A_kg, e_entities_curr)
 
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
             e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
@@ -260,7 +273,7 @@ class AKDN(nn.Module):
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
                  e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
-                 e_items_kg = F.dropout(e_items_kg, p=self.mess_dropout[i], training=self.training)
+                 # e_items_kg = F.dropout(e_items_kg, p=self.mess_dropout[i], training=self.training) # Used only for fusion
 
             # -----------------------------------------------------
             # ストック & 更新
@@ -273,8 +286,11 @@ class AKDN(nn.Module):
             e_items_dual = e_items_dual_new
             e_users_curr = e_users_new
             
-            # Entity更新 (KG側)
-            e_entities_curr = e_items_kg 
+            # [重要変更]: KG側入力の更新
+            # 以前は e_entities_curr = e_items_kg だったが、これだとIG側の情報がKGに伝わらない。
+            # Fusionされた情報 (e_items_dual_new) を次のKG入力とすることで、
+            # Userの嗜好情報がKG上のEntityへも伝播するようにする (Information Diffusion)
+            e_entities_curr = e_items_dual_new 
 
         # 最終表現 (Eq. 7)
         item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)
