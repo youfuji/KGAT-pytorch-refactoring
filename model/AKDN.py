@@ -113,14 +113,17 @@ class AKDN(nn.Module):
         # Sparse Matrix用インデックス (2, n_edges)
         self.kg_indices = torch.stack([h_list, t_list], dim=0)
 
-    def _compute_kg_attention(self):
+    def _compute_kg_attention(self, e_entities_curr):
         """
         KG Attention (A_kg) を計算 (Differentiable)
         パラメータ W_k, relation_embed, entity_user_embed の勾配が伝播するように計算を行う
+        
+        Args:
+            e_entities_curr: 現在の層のEntity Embedding (n_entities, dim)
         """
         # 1. Embedding lookup
-        h_embed = self.entity_user_embed(self.h_list)
-        t_embed = self.entity_user_embed(self.t_list)
+        h_embed = e_entities_curr[self.h_list]
+        t_embed = e_entities_curr[self.t_list]
         r_embed = self.relation_embed(self.r_list)
         
         # 2. Attention Score (Eq. 2)
@@ -228,10 +231,6 @@ class AKDN(nn.Module):
         Eq. 1, 3, 4, 5, 6 を忠実に実装
         Refactored version: Aggregation logic is separated into helper methods.
         """
-        # Step 0: KG Attention Matrixの計算 (Differentiable)
-        # これにより W_k, relation_embed が学習可能になる
-        A_kg = self._compute_kg_attention()
-
         # 初期Embedding (Layer 0)
         # Note: self.entity_user_embed は _compute_kg_attention ですでに参照されているが、
         # ここでも伝播の起点として使用する
@@ -255,6 +254,10 @@ class AKDN(nn.Module):
         e_entities_curr = e_entities
 
         for i in range(self.n_layers):
+            # Step 0: KG Attention Matrixの計算 (Dynamic & Adaptive)
+            # 現在の層のEmbedding (e_entities_curr) に基づいてAttentionを再計算
+            A_kg = self._compute_kg_attention(e_entities_curr)
+
             # 1. KG Aggregation (Eq. 1)
             e_items_kg = self._kg_aggregation(A_kg, e_entities_curr)
 
@@ -290,7 +293,11 @@ class AKDN(nn.Module):
             # 以前は e_entities_curr = e_items_kg だったが、これだとIG側の情報がKGに伝わらない。
             # Fusionされた情報 (e_items_dual_new) を次のKG入力とすることで、
             # Userの嗜好情報がKG上のEntityへも伝播するようにする (Information Diffusion)
-            e_entities_curr = e_items_dual_new 
+            # e_entities_curr = e_items_dual_new
+
+            # 論文では、KG側の情報にIGの情報は含まれない。
+            e_entities_curr = e_items_kg 
+            
 
         # 最終表現 (Eq. 7)
         item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)
