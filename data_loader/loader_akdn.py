@@ -31,23 +31,14 @@ class DataLoaderAKDN(DataLoaderBase):
         inverse_kg_data = kg_data.copy()
         inverse_kg_data = inverse_kg_data.rename({'h': 't', 't': 'h'}, axis='columns')
         inverse_kg_data['r'] += n_relations
-        
-        # 自己ループ (Self-Loops) の追加: (h, r+2n, h)
-        # エンティティ自身の情報を保持するために重要
-        n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1
-        self_loop_data = pd.DataFrame(np.zeros((n_entities, 3), dtype=np.int32), columns=['h', 'r', 't'])
-        self_loop_data['h'] = np.arange(n_entities)
-        self_loop_data['t'] = np.arange(n_entities)
-        self_loop_data['r'] = 2 * n_relations # 新しいRelation ID
-        
-        kg_data = pd.concat([kg_data, inverse_kg_data, self_loop_data], axis=0, ignore_index=True, sort=False)
+        kg_data = pd.concat([kg_data, inverse_kg_data], axis=0, ignore_index=True, sort=False)
 
         # ユーザーIDのリマッピング（Entity IDとの衝突回避）
         # AKDNでもEmbeddingテーブルを共有する場合に備え、ID空間を分けて管理します
         # 0 ~ n_entities-1 : Entity (Item含む)
         # n_entities ~     : User
         self.n_relations = max(kg_data['r']) + 1
-        self.n_entities = n_entities
+        self.n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1
         self.n_users_entities = self.n_users + self.n_entities
 
         # CFデータのIDシフト (User ID += n_entities)
