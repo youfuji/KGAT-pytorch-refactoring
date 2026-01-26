@@ -18,7 +18,7 @@ from utils.metrics import calc_metrics_at_k
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def custom_evaluate(model, data, Ks, device):
+def custom_evaluate(model, data, Ks, device, kg_dict):
     """
     Evaluates the model and returns per-user metrics for analysis.
     """
@@ -35,7 +35,7 @@ def custom_evaluate(model, data, Ks, device):
     n_items = data.n_items
     item_ids = torch.arange(n_items, dtype=torch.long).to(device)
     
-    metric_names = ['recall', 'ndcg']
+    metric_names = ['recall', 'ndcg', 'amr']
     # Storage for per-user metrics: {k: {'recall': [val, ...], 'ndcg': [val, ...]}}
     per_user_metrics = {k: {m: [] for m in metric_names} for k in Ks}
     all_evaluated_users = []
@@ -50,7 +50,7 @@ def custom_evaluate(model, data, Ks, device):
             batch_scores = batch_scores.cpu()
             
             # Calculate metrics
-            batch_metrics = calc_metrics_at_k(batch_scores, train_user_dict, test_user_dict, batch_user_ids.cpu().numpy(), item_ids.cpu().numpy(), Ks)
+            batch_metrics = calc_metrics_at_k(batch_scores, train_user_dict, test_user_dict, batch_user_ids.cpu().numpy(), item_ids.cpu().numpy(), Ks, kg_dict)
             
             # Store results
             for k in Ks:
@@ -87,20 +87,23 @@ def analyze_groups(user_ids, per_user_metrics, train_user_dict, k=20):
     
     recall_list = np.array(per_user_metrics[k]['recall'])
     ndcg_list = np.array(per_user_metrics[k]['ndcg'])
+    amr_list = np.array(per_user_metrics[k]['amr'])
     
     for group_name, mask in groups.items():
         count = np.sum(mask)
         if count == 0:
-            results[group_name] = {'count': 0, 'recall': 0.0, 'ndcg': 0.0}
+            results[group_name] = {'count': 0, 'recall': 0.0, 'ndcg': 0.0, 'amr': 0.0}
             continue
             
         group_recall = recall_list[mask]
         group_ndcg = ndcg_list[mask]
+        group_amr = amr_list[mask]
         
         results[group_name] = {
             'count': count,
             'recall': np.mean(group_recall),
-            'ndcg': np.mean(group_ndcg)
+            'ndcg': np.mean(group_ndcg),
+            'amr': np.mean(group_amr)
         }
         
     return results
@@ -148,7 +151,12 @@ def run_ablation():
     
     # Set KG structure
     relations = list(data.train_relation_dict.keys())
+    # Set KG structure
+    relations = list(data.train_relation_dict.keys())
     model.set_kg_structure(data.h_list.to(device), data.t_list.to(device), data.r_list.to(device), relations)
+    
+    # Prepare KG Dict for AMR
+    kg_dict = {h: set([t for t, r in v]) for h, v in data.train_kg_dict.items()}
     
     # ---------------------------------------------------------
     # Experiments
@@ -168,14 +176,16 @@ def run_ablation():
         model.gate_control = gate_mode
         
         # Evaluate
-        user_ids, metrics = custom_evaluate(model, data, Ks, device)
+        user_ids, metrics = custom_evaluate(model, data, Ks, device, kg_dict)
         
         # Overall Results for K=20
         k = 20
         overall_recall = np.mean(metrics[k]['recall'])
+        overall_recall = np.mean(metrics[k]['recall'])
         overall_ndcg = np.mean(metrics[k]['ndcg'])
+        overall_amr = np.mean(metrics[k]['amr'])
         
-        logging.info(f"Exp {exp_id} Overall: Recall@{k} = {overall_recall:.4f}, NDCG@{k} = {overall_ndcg:.4f}")
+        logging.info(f"Exp {exp_id} Overall: Recall@{k} = {overall_recall:.4f}, NDCG@{k} = {overall_ndcg:.4f}, AMR@{k} = {overall_amr:.4f}")
         
         # Group Analysis
         group_res = analyze_groups(user_ids, metrics, data.train_user_dict, k=k)
@@ -184,17 +194,20 @@ def run_ablation():
         exp_res = {
             'Experiment': exp_name,
             'Overall Recall': overall_recall,
-            'Overall NDCG': overall_ndcg
+            'Overall Recall': overall_recall,
+            'Overall NDCG': overall_ndcg,
+            'Overall AMR': overall_amr
         }
         for g_name, g_vals in group_res.items():
             exp_res[f'{g_name} Recall'] = g_vals['recall']
             exp_res[f'{g_name} NDCG'] = g_vals['ndcg']
+            exp_res[f'{g_name} AMR'] = g_vals['amr']
             
         final_results.append(exp_res)
 
         logging.info(f"Exp {exp_id} Group Analysis:")
         for g_name, g_vals in group_res.items():
-            logging.info(f"  {g_name}: Recall={g_vals['recall']:.4f}, NDCG={g_vals['ndcg']:.4f}")
+            logging.info(f"  {g_name}: Recall={g_vals['recall']:.4f}, NDCG={g_vals['ndcg']:.4f}, AMR={g_vals['amr']:.4f}")
             
     # ---------------------------------------------------------
     # Summary & Visualization
@@ -214,19 +227,21 @@ def run_ablation():
         # Basic Plotting
         # Plot Recall Comparison
         try:
-            metrics_to_plot = ['Overall Recall', 'Overall NDCG']
+            metrics_to_plot = ['Overall Recall', 'Overall NDCG', 'Overall AMR']
             # Also plot specific groups if they exist
             # ...
             
             fig, ax = plt.subplots(figsize=(10, 6))
             x = np.arange(len(experiments))
-            width = 0.35
+            width = 0.25
             
             recalls = df['Overall Recall'].values
             ndcgs = df['Overall NDCG'].values
+            amrs = df['Overall AMR'].values
             
-            rects1 = ax.bar(x - width/2, recalls, width, label='Recall@20')
-            rects2 = ax.bar(x + width/2, ndcgs, width, label='NDCG@20')
+            rects1 = ax.bar(x - width, recalls, width, label='Recall@20')
+            rects2 = ax.bar(x, ndcgs, width, label='NDCG@20')
+            rects3 = ax.bar(x + width, amrs, width, label='AMR@20')
             
             ax.set_ylabel('Score')
             ax.set_title('Ablation Study: Overall Performance')

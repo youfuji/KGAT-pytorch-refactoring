@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
+from collections import Counter
 
 
 def calc_recall(rank, ground_truth, k):
@@ -95,6 +96,74 @@ def recall_at_k_batch(hits, k):
     return res
 
 
+def calc_amr(rank, history_list, kg_dict):
+    """
+    calculate Attribute Match Rate (AMR) of one example
+    rank: list, recommended items
+    history_list: list, user's history items
+    kg_dict: dict, item -> set(attribute entities)
+    """
+    if len(history_list) == 0 or len(rank) == 0:
+        return 0.
+
+    # Optimization: Count attribute frequencies in history
+    # sum_{j in History} |A_i intersection A_j| == sum_{attr in A_i} count(attr in History)
+    history_attr_counts = Counter()
+    valid_history_count = 0
+    for h_item in history_list:
+        if h_item in kg_dict:
+            history_attr_counts.update(kg_dict[h_item])
+            valid_history_count += 1
+    
+    if valid_history_count == 0:
+        return 0.
+    
+    amr_sum = 0
+    
+    for i_item in rank:
+        if i_item not in kg_dict:
+            continue
+            
+        attrs_i = kg_dict[i_item]
+        if len(attrs_i) == 0:
+            continue
+            
+        # Sum of counts for attributes in item i
+        # This is equivalent to sum_{j} |attrs_i intersection attrs_j|
+        intersection_sum = sum(history_attr_counts[attr] for attr in attrs_i)
+        
+        amr_i = intersection_sum / len(history_list)
+        amr_sum += amr_i
+        
+    # Returning average AMR for the items in rank
+    return amr_sum / len(rank)
+
+
+def calc_amr_batch(rank_indices, history_items_list, kg_dict, k):
+    """
+    calculate AMR@k for a batch of users
+    rank_indices: array, (n_batch_users, n_items) - sorted item indices
+    history_items_list: list of lists, history items for each user in batch
+    kg_dict: dict, item -> set(attribute entities)
+    k: int
+    """
+    amr_scores = []
+    # Use only top-k
+    top_k_items = rank_indices[:, :k]
+    
+    for idx, items in enumerate(top_k_items):
+        history = history_items_list[idx]
+        if isinstance(items, torch.Tensor):
+            items = items.cpu().numpy()
+        if isinstance(history, torch.Tensor):
+            history = history.cpu().numpy()
+            
+        amr = calc_amr(items, history, kg_dict)
+        amr_scores.append(amr)
+        
+    return np.array(amr_scores)
+
+
 def F1(pre, rec):
     if pre + rec > 0:
         return (2.0 * pre * rec) / (pre + rec)
@@ -115,9 +184,11 @@ def logloss(ground_truth, prediction):
     return logloss
 
 
-def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item_ids, Ks):
+def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item_ids, Ks, kg_dict=None):
     """
     cf_scores: (n_users, n_items)
+    kg_dict: dict (optional). mapping from item_id to set/list of attribute entities.
+             keys should be item IDs (integers). value should be set of entity IDs.
     """
     test_pos_item_binary = np.zeros([len(user_ids), len(item_ids)], dtype=np.float32)
     for idx, u in enumerate(user_ids):
@@ -143,6 +214,12 @@ def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item
         metrics_dict[k]['precision'] = precision_at_k_batch(binary_hit, k)
         metrics_dict[k]['recall']    = recall_at_k_batch(binary_hit, k)
         metrics_dict[k]['ndcg']      = ndcg_at_k_batch(binary_hit, k)
+
+        if kg_dict is not None:
+            # history items for each user in this batch
+            history_items_list = [train_user_dict[u] for u in user_ids]
+            metrics_dict[k]['amr'] = calc_amr_batch(rank_indices, history_items_list, kg_dict, k)
+
     return metrics_dict
 
 
