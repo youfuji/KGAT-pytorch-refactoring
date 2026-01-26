@@ -1,3 +1,5 @@
+import sys
+import argparse
 import os
 import torch
 import numpy as np
@@ -9,8 +11,22 @@ from model.AKDN import AKDN
 from utils.model_helper import load_model
 
 def visualize_gate_coefficients():
+    # Pre-parse arguments to handle script-specific args and remove them from sys.argv
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--save_dir', type=str, default=None)
+    parser.add_argument('--model_type', type=str, default=None)
+    
+    local_args, remaining_argv = parser.parse_known_args()
+    
+    # Update sys.argv so parse_akdn_args doesn't complain
+    sys.argv = [sys.argv[0]] + remaining_argv
+
     # 1. Parse Arguments
     args = parse_akdn_args()
+    
+    # Override save_dir if provided
+    if local_args.save_dir:
+        args.save_dir = local_args.save_dir
     
     # Setup simple logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
