@@ -65,6 +65,10 @@ class AKDN(nn.Module):
         # Activation
         self.leakyrelu = nn.LeakyReLU()
         self.sigmoid = nn.Sigmoid()
+        
+        # 可視化用
+        self.record_gate = False
+        self.gate_coefficients = []
 
     def calc_kg_attention(self, h, t, r):
         """
@@ -164,6 +168,9 @@ class AKDN(nn.Module):
         gate_input = self.W_a(kg_embed) + self.W_b(ig_embed)
         g = self.sigmoid(gate_input)
         
+        if self.record_gate:
+            self.gate_coefficients.append(g.detach().cpu())
+        
         # 融合 e = g * kg + (1-g) * ig
         fused_embed = g * kg_embed + (1 - g) * ig_embed
         return fused_embed
@@ -252,6 +259,9 @@ class AKDN(nn.Module):
         e_items_dual = e_entities
         e_users_curr = e_users
         e_entities_curr = e_entities
+        
+        if self.record_gate:
+            self.gate_coefficients = []
 
         for i in range(self.n_layers):
             # Step 0: KG Attention Matrixの計算 (Dynamic & Adaptive)
