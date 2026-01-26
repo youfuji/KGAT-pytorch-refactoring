@@ -199,6 +199,7 @@ def run_ablation():
             'Overall AMR': overall_amr
         }
         for g_name, g_vals in group_res.items():
+            exp_res[f'{g_name} Count'] = g_vals['count']
             exp_res[f'{g_name} Recall'] = g_vals['recall']
             exp_res[f'{g_name} NDCG'] = g_vals['ndcg']
             exp_res[f'{g_name} AMR'] = g_vals['amr']
@@ -207,7 +208,7 @@ def run_ablation():
 
         logging.info(f"Exp {exp_id} Group Analysis:")
         for g_name, g_vals in group_res.items():
-            logging.info(f"  {g_name}: Recall={g_vals['recall']:.4f}, NDCG={g_vals['ndcg']:.4f}, AMR={g_vals['amr']:.4f}")
+            logging.info(f"  {g_name} (n={g_vals['count']}): Recall={g_vals['recall']:.4f}, NDCG={g_vals['ndcg']:.4f}, AMR={g_vals['amr']:.4f}")
             
     # ---------------------------------------------------------
     # Summary & Visualization
