@@ -69,6 +69,9 @@ class AKDN(nn.Module):
         # 可視化用
         self.record_gate = False
         self.gate_coefficients = []
+        
+        # Ablation Control
+        self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
 
     def calc_kg_attention(self, h, t, r):
         """
@@ -170,6 +173,12 @@ class AKDN(nn.Module):
         
         if self.record_gate:
             self.gate_coefficients.append(g.detach().cpu())
+            
+        # Ablation Logic
+        if self.gate_control == 'kg_only':
+            g = torch.ones_like(g)
+        elif self.gate_control == 'ig_only':
+            g = torch.zeros_like(g)
         
         # 融合 e = g * kg + (1-g) * ig
         fused_embed = g * kg_embed + (1 - g) * ig_embed
