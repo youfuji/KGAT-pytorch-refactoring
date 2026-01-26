@@ -9,6 +9,7 @@ from parser.parser_akdn import parse_akdn_args
 from data_loader.loader_akdn import DataLoaderAKDN
 from model.AKDN import AKDN
 from utils.model_helper import load_model
+from main_akdn import evaluate
 
 def visualize_gate_coefficients():
     # Pre-parse arguments to handle script-specific args and remove them from sys.argv
@@ -66,6 +67,25 @@ def visualize_gate_coefficients():
     # Set KG structure
     relations = list(data.train_relation_dict.keys())
     model.set_kg_structure(data.h_list.to(device), data.t_list.to(device), data.r_list.to(device), relations)
+
+    # Calculate and log Metrics (Recall@20, NDCG@20)
+    # Ensure Ks includes 20
+    Ks = eval(args.Ks)
+    if 20 not in Ks:
+        Ks.append(20)
+        args.Ks = str(Ks) 
+    
+    logging.info(f"Evaluating model performance (Recall, NDCG @ {Ks})...")
+    _, metrics_dict = evaluate(model, data, Ks, device)
+    
+    k = 20
+    if k in metrics_dict:
+        recall = metrics_dict[k]['recall']
+        ndcg = metrics_dict[k]['ndcg']
+        logging.info(f"Performance: Recall@{k} = {recall:.4f}, NDCG@{k} = {ndcg:.4f}")
+    else:
+        logging.warning(f"Metrics for K={k} not found in results.")
+
 
     # 5. Extract Gate Coefficients
     logging.info("Extracting gate coefficients...")
