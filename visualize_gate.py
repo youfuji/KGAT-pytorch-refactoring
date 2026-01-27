@@ -100,36 +100,69 @@ def visualize_gate_coefficients():
         logging.error("No gate coefficients recorded.")
         return
 
-    # 6. Plot Histogram
-    logging.info("Plotting histogram...")
+    # 6. Plot Histograms
+    logging.info("Plotting histograms...")
     
-    # Aggregate all values from all layers
-    all_gates = torch.cat(gate_coeffs, dim=0).view(-1).numpy()
-    
-    plt.figure(figsize=(10, 6))
-    plt.hist(all_gates, bins=50, alpha=0.75, color='blue', edgecolor='black')
-    plt.title('Distribution of Gate Coefficient $g$ (Fusion Gate)')
-    plt.xlabel('Gate Value $g$ (0: Use IG, 1: Use KG)')
-    plt.ylabel('Frequency')
-    plt.grid(True, alpha=0.3)
-    
-    # Save statistics
-    mean_g = np.mean(all_gates)
-    std_g = np.std(all_gates)
-    plt.text(0.05, 0.95, f'Mean: {mean_g:.4f}\nStd: {std_g:.4f}', transform=plt.gca().transAxes,
-             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
-
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
-
-    save_path = os.path.join(args.save_dir, 'gate_coefficient_histogram.png')
-    plt.savefig(save_path)
-    logging.info(f"Histogram saved to {save_path}")
-    
-    # Optional: Plot per layer
-    if len(gate_coeffs) > 1:
+    # Helper to plot and save
+    def plot_histogram(data_list, title, xlabel, filename, color='blue'):
+        all_data = torch.cat(data_list, dim=0).view(-1).numpy()
+        
         plt.figure(figsize=(10, 6))
-        for i, g_layer in enumerate(gate_coeffs):
+        plt.hist(all_data, bins=50, alpha=0.75, color=color, edgecolor='black')
+        plt.title(title)
+        plt.xlabel(xlabel)
+        plt.ylabel('Frequency')
+        plt.grid(True, alpha=0.3)
+        
+        # Save statistics
+        mean_val = np.mean(all_data)
+        std_val = np.std(all_data)
+        plt.text(0.05, 0.95, f'Mean: {mean_val:.4f}\nStd: {std_val:.4f}', transform=plt.gca().transAxes,
+                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+
+        if not os.path.exists(args.save_dir):
+            os.makedirs(args.save_dir)
+
+        save_path = os.path.join(args.save_dir, filename)
+        plt.savefig(save_path)
+        logging.info(f"Histogram saved to {save_path}")
+        plt.close() # Close to free memory
+
+    # 1. Gate Coefficient g ( Sigmoid(Wa*kg + Wb*ig) )
+    plot_histogram(model.gate_coefficients, 
+                   'Distribution of Gate Coefficient $g$ (Fusion Gate)', 
+                   'Gate Value $g$ (0: Use IG, 1: Use KG)', 
+                   'gate_coefficient_histogram.png', 
+                   color='blue')
+
+    # 2. Gate Input ( Wa*kg + Wb*ig ) - Pre-sigmoid
+    plot_histogram(model.gate_inputs, 
+                   'Distribution of Gate Input (Pre-Sigmoid)', 
+                   'Value ($W_a e_{kg} + W_b e_{ig}$)', 
+                   'gate_input_presigmoid_histogram.png', 
+                   color='green')
+
+    # 3. Wa * KG component
+    plot_histogram(model.gate_wa_kg, 
+                   'Distribution of $W_a e_{kg}$ Component', 
+                   'Value ($W_a e_{kg}$)', 
+                   'gate_wa_kg_histogram.png', 
+                   color='orange')
+
+    # 4. Wb * IG component
+    plot_histogram(model.gate_wb_ig, 
+                   'Distribution of $W_b e_{ig}$ Component', 
+                   'Value ($W_b e_{ig}$)', 
+                   'gate_wb_ig_histogram.png', 
+                   color='purple')
+    
+    # Optional: Plot per layer for g (keeping original functionality if needed, or we can expand it for others too)
+    # For now, let's keep the per-layer plot just for 'g' to avoid clutter, or we can remove it if main plots are sufficient.
+    # The user asked for specific components, so the global histograms are most important.
+    
+    if len(model.gate_coefficients) > 1:
+        plt.figure(figsize=(10, 6))
+        for i, g_layer in enumerate(model.gate_coefficients):
             g_np = g_layer.view(-1).numpy()
             plt.hist(g_np, bins=50, alpha=0.5, label=f'Layer {i+1}', density=True)
         
@@ -142,6 +175,7 @@ def visualize_gate_coefficients():
         save_path_layer = os.path.join(args.save_dir, 'gate_coefficient_histogram_per_layer.png')
         plt.savefig(save_path_layer)
         logging.info(f"Per-layer histogram saved to {save_path_layer}")
+        plt.close()
 
 if __name__ == "__main__":
     visualize_gate_coefficients()

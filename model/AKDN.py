@@ -69,6 +69,9 @@ class AKDN(nn.Module):
         # 可視化用
         self.record_gate = False
         self.gate_coefficients = []
+        self.gate_inputs = []
+        self.gate_wa_kg = []
+        self.gate_wb_ig = []
         
         # Ablation Control
         self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
@@ -168,11 +171,17 @@ class AKDN(nn.Module):
         Fusion Gate Mechanism (Eq. 4, 5) - Items Only
         """
         # Gate計算 g = sigmoid(W_a * kg + W_b * ig)
-        gate_input = self.W_a(kg_embed) + self.W_b(ig_embed)
+        # Gate計算 g = sigmoid(W_a * kg + W_b * ig)
+        term_kg = self.W_a(kg_embed)
+        term_ig = self.W_b(ig_embed)
+        gate_input = term_kg + term_ig
         g = self.sigmoid(gate_input)
         
         if self.record_gate:
             self.gate_coefficients.append(g.detach().cpu())
+            self.gate_inputs.append(gate_input.detach().cpu())
+            self.gate_wa_kg.append(term_kg.detach().cpu())
+            self.gate_wb_ig.append(term_ig.detach().cpu())
             
         # Ablation Logic
         if self.gate_control == 'kg_only':
@@ -271,6 +280,9 @@ class AKDN(nn.Module):
         
         if self.record_gate:
             self.gate_coefficients = []
+            self.gate_inputs = []
+            self.gate_wa_kg = []
+            self.gate_wb_ig = []
 
         for i in range(self.n_layers):
             # Step 0: KG Attention Matrixの計算 (Dynamic & Adaptive)
