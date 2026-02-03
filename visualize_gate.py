@@ -103,79 +103,130 @@ def visualize_gate_coefficients():
     # 6. Plot Histograms
     logging.info("Plotting histograms...")
     
-    # Helper to plot and save
-    def plot_histogram(data_list, title, xlabel, filename, color='blue'):
-        all_data = torch.cat(data_list, dim=0).view(-1).numpy()
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
+
+    def plot_histogram(data_tensor, title, xlabel, filename, color='blue'):
+        # Flatten data
+        data_np = data_tensor.view(-1).numpy()
         
         plt.figure(figsize=(10, 6))
-        plt.hist(all_data, bins=50, alpha=0.75, color=color, edgecolor='black')
+        plt.hist(data_np, bins=50, alpha=0.75, color=color, edgecolor='black')
         plt.title(title)
         plt.xlabel(xlabel)
         plt.ylabel('Frequency')
         plt.grid(True, alpha=0.3)
         
         # Save statistics
-        mean_val = np.mean(all_data)
-        std_val = np.std(all_data)
+        mean_val = np.mean(data_np)
+        std_val = np.std(data_np)
         plt.text(0.05, 0.95, f'Mean: {mean_val:.4f}\nStd: {std_val:.4f}', transform=plt.gca().transAxes,
                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
 
-        if not os.path.exists(args.save_dir):
-            os.makedirs(args.save_dir)
-
         save_path = os.path.join(args.save_dir, filename)
         plt.savefig(save_path)
-        logging.info(f"Histogram saved to {save_path}")
-        plt.close() # Close to free memory
-
-    # 1. Gate Coefficient g ( Sigmoid(Wa*kg + Wb*ig) )
-    plot_histogram(model.gate_coefficients, 
-                   'Distribution of Gate Coefficient $g$ (Fusion Gate)', 
-                   'Gate Value $g$ (0: Use IG, 1: Use KG)', 
-                   'gate_coefficient_histogram.png', 
-                   color='blue')
-
-    # 2. Gate Input ( Wa*kg + Wb*ig ) - Pre-sigmoid
-    plot_histogram(model.gate_inputs, 
-                   'Distribution of Gate Input (Pre-Sigmoid)', 
-                   'Value ($W_a e_{kg} + W_b e_{ig}$)', 
-                   'gate_input_presigmoid_histogram.png', 
-                   color='green')
-
-    # 3. Wa * KG component
-    plot_histogram(model.gate_wa_kg, 
-                   'Distribution of $W_a e_{kg}$ Component', 
-                   'Value ($W_a e_{kg}$)', 
-                   'gate_wa_kg_histogram.png', 
-                   color='orange')
-
-    # 4. Wb * IG component
-    plot_histogram(model.gate_wb_ig, 
-                   'Distribution of $W_b e_{ig}$ Component', 
-                   'Value ($W_b e_{ig}$)', 
-                   'gate_wb_ig_histogram.png', 
-                   color='purple')
-    
-    # Optional: Plot per layer for g (keeping original functionality if needed, or we can expand it for others too)
-    # For now, let's keep the per-layer plot just for 'g' to avoid clutter, or we can remove it if main plots are sufficient.
-    # The user asked for specific components, so the global histograms are most important.
-    
-    if len(model.gate_coefficients) > 1:
-        plt.figure(figsize=(10, 6))
-        for i, g_layer in enumerate(model.gate_coefficients):
-            g_np = g_layer.view(-1).numpy()
-            plt.hist(g_np, bins=50, alpha=0.5, label=f'Layer {i+1}', density=True)
-        
-        plt.title('Distribution of Gate Coefficient $g$ (Per Layer)')
-        plt.xlabel('Gate Value $g$')
-        plt.ylabel('Density')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        save_path_layer = os.path.join(args.save_dir, 'gate_coefficient_histogram_per_layer.png')
-        plt.savefig(save_path_layer)
-        logging.info(f"Per-layer histogram saved to {save_path_layer}")
+        logging.info(f"Saved: {filename}")
         plt.close()
+
+    # Static Weights (Shared across layers)
+    wa_weights = model.W_a.weight.detach().cpu()
+    wb_weights = model.W_b.weight.detach().cpu()
+    
+    # Layers to process: 1, 2, 3
+    # Note: model.gate_* lists correspond to layers 0, 1, 2 index-wise
+    num_layers = min(len(model.gate_coefficients), 3) # Should be 3 based on standard config
+    
+    # Data gathering for All Layers
+    all_layers_data = {
+        'wa': [], 'ekg': [], 'eig': [], 'wb': [], 
+        'wa_ekg': [], 'wb_eig': [], 'sum': [], 'g': []
+    }
+
+    for i in range(num_layers):
+        layer_num = i + 1
+        
+        # Layer specific data
+        e_kg_layer = model.gate_kg[i]
+        e_ig_layer = model.gate_ig[i]
+        wa_ekg_layer = model.gate_wa_kg[i]
+        wb_eig_layer = model.gate_wb_ig[i]
+        sum_layer = model.gate_inputs[i]
+        g_layer = model.gate_coefficients[i]
+        
+        # 1. w_a (Shared)
+        plot_histogram(wa_weights, 
+                       f'Layer {layer_num}: Distribution of $W_a$ Weights', 
+                       'Weight Value', 
+                       f'layer_{layer_num}_w_a.png', color='orange')
+        all_layers_data['wa'].append(wa_weights) # Duplicate but conceptually consistent
+        
+        # 2. e_kg
+        plot_histogram(e_kg_layer,
+                       f'Layer {layer_num}: Distribution of $e_{{kg}}$',
+                       'Embedding Value',
+                       f'layer_{layer_num}_e_kg.png', color='green')
+        all_layers_data['ekg'].append(e_kg_layer)
+
+        # 3. e_ig
+        plot_histogram(e_ig_layer,
+                       f'Layer {layer_num}: Distribution of $e_{{ig}}$',
+                       'Embedding Value',
+                       f'layer_{layer_num}_e_ig.png', color='skyblue')
+        all_layers_data['eig'].append(e_ig_layer)
+
+        # 4. w_b (Shared)
+        plot_histogram(wb_weights,
+                       f'Layer {layer_num}: Distribution of $W_b$ Weights',
+                       'Weight Value',
+                       f'layer_{layer_num}_w_b.png', color='purple')
+        all_layers_data['wb'].append(wb_weights)
+
+        # 5. w_a * e_kg
+        plot_histogram(wa_ekg_layer,
+                       f'Layer {layer_num}: Distribution of $W_a e_{{kg}}$',
+                       'Value',
+                       f'layer_{layer_num}_wa_ekg.png', color='olive')
+        all_layers_data['wa_ekg'].append(wa_ekg_layer)
+
+        # 6. w_b * e_ig
+        plot_histogram(wb_eig_layer,
+                       f'Layer {layer_num}: Distribution of $W_b e_{{ig}}$',
+                       'Value',
+                       f'layer_{layer_num}_wb_eig.png', color='teal')
+        all_layers_data['wb_eig'].append(wb_eig_layer)
+
+        # 7. Sum (Pre-sigmoid)
+        plot_histogram(sum_layer,
+                       f'Layer {layer_num}: Distribution of $W_a e_{{kg}} + W_b e_{{ig}}$',
+                       'Value',
+                       f'layer_{layer_num}_sum.png', color='red')
+        all_layers_data['sum'].append(sum_layer)
+
+        # 8. g (Sigmoid output)
+        plot_histogram(g_layer,
+                       f'Layer {layer_num}: Distribution of Gate Coefficient $g$',
+                       'Gate Value',
+                       f'layer_{layer_num}_g.png', color='blue')
+        all_layers_data['g'].append(g_layer)
+
+
+    # Plot All Layers (Aggregated)
+    logging.info("Plotting aggregated histograms...")
+    
+    # Helper for aggregated
+    def plot_agg(key, title, filename, color):
+        if not all_layers_data[key]: return
+        combined = torch.cat(all_layers_data[key], dim=0) if isinstance(all_layers_data[key][0], torch.Tensor) else torch.cat([torch.tensor(x) for x in all_layers_data[key]], dim=0)
+        plot_histogram(combined, title, 'Value', filename, color)
+
+    plot_agg('wa', 'All Layers: Distribution of $W_a$ Weights', 'all_layers_w_a.png', 'orange')
+    plot_agg('ekg', 'All Layers: Distribution of $e_{{kg}}$', 'all_layers_e_kg.png', 'green')
+    plot_agg('eig', 'All Layers: Distribution of $e_{{ig}}$', 'all_layers_e_ig.png', 'skyblue')
+    plot_agg('wb', 'All Layers: Distribution of $W_b$ Weights', 'all_layers_w_b.png', 'purple')
+    plot_agg('wa_ekg', 'All Layers: Distribution of $W_a e_{{kg}}$', 'all_layers_wa_ekg.png', 'olive')
+    plot_agg('wb_eig', 'All Layers: Distribution of $W_b e_{{ig}}$', 'all_layers_wb_eig.png', 'teal')
+    plot_agg('sum', 'All Layers: Distribution of $W_a e_{{kg}} + W_b e_{{ig}}$', 'all_layers_sum.png', 'red')
+    plot_agg('g', 'All Layers: Distribution of Gate Coefficient $g$', 'all_layers_g.png', 'blue')
 
 if __name__ == "__main__":
     visualize_gate_coefficients()

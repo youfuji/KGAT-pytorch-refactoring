@@ -72,6 +72,8 @@ class AKDN(nn.Module):
         self.gate_inputs = []
         self.gate_wa_kg = []
         self.gate_wb_ig = []
+        self.gate_ig = []
+        self.gate_kg = []
         
         # Ablation Control
         self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
@@ -182,6 +184,8 @@ class AKDN(nn.Module):
             self.gate_inputs.append(gate_input.detach().cpu())
             self.gate_wa_kg.append(term_kg.detach().cpu())
             self.gate_wb_ig.append(term_ig.detach().cpu())
+            self.gate_ig.append(ig_embed.detach().cpu())
+            self.gate_kg.append(kg_embed.detach().cpu())
             
         # Ablation Logic
         if self.gate_control == 'kg_only':
@@ -283,6 +287,8 @@ class AKDN(nn.Module):
             self.gate_inputs = []
             self.gate_wa_kg = []
             self.gate_wb_ig = []
+            self.gate_ig = []
+            self.gate_kg = []
 
         for i in range(self.n_layers):
             # Step 0: KG Attention Matrixの計算 (Dynamic & Adaptive)
