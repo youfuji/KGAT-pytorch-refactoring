@@ -210,23 +210,47 @@ def visualize_gate_coefficients():
         all_layers_data['g'].append(g_layer)
 
 
-    # Plot All Layers (Aggregated)
+    # Plot All Layers (Aggregated with Layer Colors)
     logging.info("Plotting aggregated histograms...")
     
     # Helper for aggregated
-    def plot_agg(key, title, filename, color):
+    def plot_agg(key, title, filename):
         if not all_layers_data[key]: return
-        combined = torch.cat(all_layers_data[key], dim=0) if isinstance(all_layers_data[key][0], torch.Tensor) else torch.cat([torch.tensor(x) for x in all_layers_data[key]], dim=0)
-        plot_histogram(combined, title, 'Value', filename, color)
+        
+        data_list = all_layers_data[key]
+        
+        plt.figure(figsize=(10, 6))
+        
+        colors = ['red', 'green', 'blue', 'orange', 'purple'] # Enough for expected layers
+        
+        for i, data_tensor in enumerate(data_list):
+            data_np = data_tensor.view(-1).numpy()
+            layer_label = f'Layer {i+1}'
+            color = colors[i % len(colors)]
+            
+            # Use density=True if you want to compare shapes, or just alpha for overlap
+            # Here using alpha overlap to show raw counts/distribution relative to each other
+            plt.hist(data_np, bins=50, alpha=0.5, label=layer_label, color=color, edgecolor='black')
 
-    plot_agg('wa', 'All Layers: Distribution of $W_a$ Weights', 'all_layers_w_a.png', 'orange')
-    plot_agg('ekg', 'All Layers: Distribution of $e_{{kg}}$', 'all_layers_e_kg.png', 'green')
-    plot_agg('eig', 'All Layers: Distribution of $e_{{ig}}$', 'all_layers_e_ig.png', 'skyblue')
-    plot_agg('wb', 'All Layers: Distribution of $W_b$ Weights', 'all_layers_w_b.png', 'purple')
-    plot_agg('wa_ekg', 'All Layers: Distribution of $W_a e_{{kg}}$', 'all_layers_wa_ekg.png', 'olive')
-    plot_agg('wb_eig', 'All Layers: Distribution of $W_b e_{{ig}}$', 'all_layers_wb_eig.png', 'teal')
-    plot_agg('sum', 'All Layers: Distribution of $W_a e_{{kg}} + W_b e_{{ig}}$', 'all_layers_sum.png', 'red')
-    plot_agg('g', 'All Layers: Distribution of Gate Coefficient $g$', 'all_layers_g.png', 'blue')
+        plt.title(title)
+        plt.xlabel('Value')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        save_path = os.path.join(args.save_dir, filename)
+        plt.savefig(save_path)
+        logging.info(f"Saved: {filename}")
+        plt.close()
+
+    plot_agg('wa', 'All Layers: Distribution of $W_a$ Weights', 'all_layers_w_a.png')
+    plot_agg('ekg', 'All Layers: Distribution of $e_{{kg}}$', 'all_layers_e_kg.png')
+    plot_agg('eig', 'All Layers: Distribution of $e_{{ig}}$', 'all_layers_e_ig.png')
+    plot_agg('wb', 'All Layers: Distribution of $W_b$ Weights', 'all_layers_w_b.png')
+    plot_agg('wa_ekg', 'All Layers: Distribution of $W_a e_{{kg}}$', 'all_layers_wa_ekg.png')
+    plot_agg('wb_eig', 'All Layers: Distribution of $W_b e_{{ig}}$', 'all_layers_wb_eig.png')
+    plot_agg('sum', 'All Layers: Distribution of $W_a e_{{kg}} + W_b e_{{ig}}$', 'all_layers_sum.png')
+    plot_agg('g', 'All Layers: Distribution of Gate Coefficient $g$', 'all_layers_g.png')
 
 if __name__ == "__main__":
     visualize_gate_coefficients()
