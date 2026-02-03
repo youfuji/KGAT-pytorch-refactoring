@@ -219,7 +219,7 @@ def visualize_gate_coefficients():
         
         data_list = all_layers_data[key]
         
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(12, 8))
         
         colors = ['red', 'green', 'blue', 'orange', 'purple'] # Enough for expected layers
         
@@ -228,14 +228,14 @@ def visualize_gate_coefficients():
             layer_label = f'Layer {i+1}'
             color = colors[i % len(colors)]
             
-            # Use density=True if you want to compare shapes, or just alpha for overlap
-            # Here using alpha overlap to show raw counts/distribution relative to each other
-            plt.hist(data_np, bins=50, alpha=0.5, label=layer_label, color=color, edgecolor='black')
+            # Use step type to allow seeing overlapping distributions
+            plt.hist(data_np, bins=50, alpha=1.0, label=layer_label, color=color, 
+                     histtype='step', linewidth=2.5, density=False)
 
-        plt.title(title)
-        plt.xlabel('Value')
-        plt.ylabel('Frequency')
-        plt.legend()
+        plt.title(title, fontsize=16)
+        plt.xlabel('Value', fontsize=14)
+        plt.ylabel('Frequency', fontsize=14)
+        plt.legend(fontsize=12)
         plt.grid(True, alpha=0.3)
         
         save_path = os.path.join(args.save_dir, filename)
