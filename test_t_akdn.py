@@ -20,8 +20,11 @@ def make_dummy_args(**overrides):
         embed_dim=16,
         relation_dim=16,
         transr_dim=8,
-        conv_dim_list='[16]',
-        mess_dropout='[0.0]',
+        # 注意: 2層以上必要。1層だとTransRパラメータからlossへの勾配経路が存在しない。
+        # 理由: KG集約→fusion gateの出力は「次の層」のIG入力になるため、
+        #        1層だけだとTransRの影響が最終出力に到達しない。
+        conv_dim_list='[16, 16]',
+        mess_dropout='[0.0, 0.0]',
         cf_l2loss_lambda=1e-5,
         lambda_kg=0.1,
         learnable_lambda=0,
