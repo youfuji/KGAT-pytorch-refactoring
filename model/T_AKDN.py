@@ -117,6 +117,31 @@ class T_AKDN(nn.Module):
         # Sparse Matrix用インデックス (2, n_edges)
         self.kg_indices = torch.stack([h_list, t_list], dim=0)
 
+    def _edge_softmax(self, logits):
+        """
+        Edge-level softmax per center node with proper autograd support.
+        torch.sparse.softmax は勾配を logits まで逆伝播しないため、
+        手動で scatter-based softmax を実装する。
+        
+        Args:
+            logits: [E] attention logits per edge
+        Returns:
+            alpha: [E] normalized attention weights (sum-to-1 per center node)
+        """
+        # Numerical stability: subtract global max (detached, no grad needed)
+        logits_stable = logits - logits.detach().max()
+        
+        # Exponentiate
+        exp_logits = torch.exp(logits_stable)
+        
+        # Per-center-node sum (out-of-place index_add for proper autograd)
+        sum_exp = torch.zeros(self.n_entities, device=logits.device, dtype=logits.dtype)
+        sum_exp = sum_exp.index_add(0, self.h_list, exp_logits)
+        
+        # Normalize
+        alpha = exp_logits / (sum_exp[self.h_list] + 1e-16)
+        return alpha
+
     def _compute_kg_attention(self, e_entities_curr):
         """
         TransR-Enhanced KG Attention (A_kg) を計算 (Differentiable)
@@ -165,13 +190,14 @@ class T_AKDN(nn.Module):
         
         attention_values = sem - lam * dist                         # [E]
         
-        # 6. Create Sparse Matrix & Softmax (既存AKDNと同一)
-        A_kg_unorm = torch.sparse_coo_tensor(self.kg_indices, attention_values, 
-                                             size=(self.n_entities, self.n_entities), 
-                                             device=self.kg_indices.device)
+        # 6. Edge-level Softmax (autograd-compatible) & Sparse Matrix
+        # torch.sparse.softmax は勾配を values まで伝播しないため、
+        # 手動の edge softmax を使用して gradient flow を保証する
+        alpha = self._edge_softmax(attention_values)  # [E], sum-to-1 per center node
         
-        # Softmax Normalization (Row-wise, i.e. per center node)
-        A_kg = torch.sparse.softmax(A_kg_unorm, dim=1)
+        A_kg = torch.sparse_coo_tensor(self.kg_indices, alpha,
+                                       size=(self.n_entities, self.n_entities),
+                                       device=self.kg_indices.device)
         
         return A_kg
 
