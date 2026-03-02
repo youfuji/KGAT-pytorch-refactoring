@@ -194,8 +194,6 @@ class T_AKDN(nn.Module):
                                        size=(self.n_entities, self.n_entities),
                                        device=self.kg_indices.device)
         
-        A_kg = A_kg.coalesce()
-        
         return A_kg
 
     def fusion_gate(self, kg_embed, ig_embed):
