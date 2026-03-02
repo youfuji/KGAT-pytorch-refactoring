@@ -1,6 +1,7 @@
 """
 Smoke test for T-AKDN (TransR-Enhanced AKDN).
-Validates: shape correctness, gradient flow, pi/alpha diagnostics.
+Validates: shape correctness, gradient flow, pi/alpha diagnostics,
+L2 normalization, and learnable lambda.
 """
 import sys
 import os
@@ -10,6 +11,7 @@ sys.path.insert(0, '/Users/yoki/Desktop/KGAT-pytorch-refactoring')
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 
 from model.T_AKDN import T_AKDN
@@ -26,9 +28,6 @@ def make_dummy_args(**overrides):
         conv_dim_list='[16, 16]',
         mess_dropout='[0.0, 0.0]',
         cf_l2loss_lambda=1e-5,
-        lambda_kg=0.1,
-        learnable_lambda=0,
-        dist_normalize=0,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -96,26 +95,34 @@ def test_forward_and_gradients():
     for name, param in model.named_parameters():
         if param.requires_grad and param.grad is not None:
             grad_norm = param.grad.norm().item()
-            if 'transr_proj' in name or 'relation_embed_k' in name or 'W_k' in name:
+            if 'transr_proj' in name or 'relation_embed_k' in name or 'W_k' in name or 'lambda_raw' in name:
                 print(f"  grad norm [{name}]: {grad_norm:.6f}")
     
     assert model.transr_proj.weight.grad is not None, "transr_proj should have gradients"
     assert model.relation_embed_k.weight.grad is not None, "relation_embed_k should have gradients"
     assert model.W_k.weight.grad is not None, "W_k should have gradients"
+    assert model.lambda_raw.grad is not None, "lambda_raw should have gradients"
     print("PASSED ✓")
 
 
 def test_learnable_lambda():
-    """Test learnable lambda: gradient flows to lambda_raw."""
+    """Test learnable lambda: gradient flows to lambda_raw, init value is -2.0."""
     print("=" * 60)
     print("TEST: Learnable Lambda")
-    args = make_dummy_args(learnable_lambda=1)
+    args = make_dummy_args()
     n_users, n_entities = 10, 50
     model, _, _, _ = build_dummy_model(args, n_users=n_users, n_entities=n_entities)
     model.train()
 
     assert hasattr(model, 'lambda_raw'), "Should have lambda_raw parameter"
     assert isinstance(model.lambda_raw, nn.Parameter), "lambda_raw should be nn.Parameter"
+    
+    # Check initial value
+    assert model.lambda_raw.item() == -2.0, f"lambda_raw init should be -2.0, got {model.lambda_raw.item()}"
+    lam_init = F.softplus(model.lambda_raw).item()
+    print(f"  lambda_raw init:     {model.lambda_raw.item():.4f}")
+    print(f"  softplus(lambda_raw): {lam_init:.4f}")
+    assert 0.1 < lam_init < 0.2, f"softplus(-2.0) should be ~0.13, got {lam_init}"
 
     user_ids = torch.randint(n_entities, n_entities + n_users, (4,))
     pos_ids = torch.randint(0, n_entities, (4,))
@@ -125,8 +132,6 @@ def test_learnable_lambda():
     loss.backward()
 
     assert model.lambda_raw.grad is not None, "lambda_raw should have gradient"
-    print(f"  lambda_raw value:    {model.lambda_raw.item():.6f}")
-    print(f"  lambda (softplus):   {torch.nn.functional.softplus(model.lambda_raw).item():.6f}")
     print(f"  lambda_raw.grad:     {model.lambda_raw.grad.item():.6f}")
     print("PASSED ✓")
 
@@ -144,26 +149,30 @@ def test_pi_statistics():
     d = args.embed_dim
     e_entities = model.entity_user_embed.weight[:n_entities]
 
-    # Manually compute pi to inspect
+    # Manually compute pi to inspect (matching the updated _compute_kg_attention)
     with torch.no_grad():
-        h_embed = e_entities[model.h_list]
-        t_embed = e_entities[model.t_list]
+        # L2 normalize before projection
+        h_embed = F.normalize(e_entities[model.h_list], p=2, dim=-1)
+        t_embed = F.normalize(e_entities[model.t_list], p=2, dim=-1)
         r_id = model.r_list
         M = model.transr_proj(r_id).view(-1, k, d)
         e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)
         e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)
-        e_r = model.relation_embed_k(r_id)
+        e_r = F.normalize(model.relation_embed_k(r_id), p=2, dim=-1)
 
         cat_embed = torch.cat([e_vr, e_ir], dim=-1)
         q = model.W_k(cat_embed)
         sem = torch.sum(q * e_r, dim=-1)
         sem = model.leakyrelu(sem)
 
-        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1)
-        pi = sem - args.lambda_kg * dist
+        # Distance always normalized by k
+        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
+        lam = F.softplus(model.lambda_raw)
+        pi = sem - lam * dist
 
     print(f"  sem  - mean:{sem.mean():.4f}  std:{sem.std():.4f}  min:{sem.min():.4f}  max:{sem.max():.4f}")
     print(f"  dist - mean:{dist.mean():.4f}  std:{dist.std():.4f}  min:{dist.min():.4f}  max:{dist.max():.4f}")
+    print(f"  lam  = {lam.item():.4f}")
     print(f"  pi   - mean:{pi.mean():.4f}  std:{pi.std():.4f}  min:{pi.min():.4f}  max:{pi.max():.4f}")
 
     assert not torch.isnan(pi).any(), "pi contains NaN!"
@@ -205,25 +214,38 @@ def test_alpha_sum_to_one():
     print("PASSED ✓")
 
 
-def test_dist_normalize():
-    """Test that dist_normalize flag divides distance by k."""
+def test_l2_normalization():
+    """Verify that embeddings are L2-normalized before TransR projection."""
     print("=" * 60)
-    print("TEST: dist_normalize flag")
-    args_no_norm = make_dummy_args(dist_normalize=0)
-    args_norm = make_dummy_args(dist_normalize=1)
+    print("TEST: L2 Normalization")
+    args = make_dummy_args()
+    n_entities = 50
+    model, _, _, _ = build_dummy_model(args, n_entities=n_entities, n_edges=100)
+    model.eval()
 
-    torch.manual_seed(42)
-    model_no, _, _, _ = build_dummy_model(args_no_norm, n_entities=50, n_edges=100)
-    
-    torch.manual_seed(42)
-    model_yes, _, _, _ = build_dummy_model(args_norm, n_entities=50, n_edges=100)
-    
-    # Copy weights so they match
-    model_yes.load_state_dict(model_no.state_dict(), strict=False)
-    model_yes.set_kg_structure(model_no.h_list, model_no.t_list, model_no.r_list, model_no.relations_set)
+    e_entities = model.entity_user_embed.weight[:n_entities].detach()
 
-    print(f"  dist_normalize=False model created ✓")
-    print(f"  dist_normalize=True  model created ✓")
+    # h_embed and t_embed should be L2-normalized
+    h_embed = F.normalize(e_entities[model.h_list], p=2, dim=-1)
+    t_embed = F.normalize(e_entities[model.t_list], p=2, dim=-1)
+    
+    h_norms = h_embed.norm(p=2, dim=-1)
+    t_norms = t_embed.norm(p=2, dim=-1)
+    
+    assert torch.allclose(h_norms, torch.ones_like(h_norms), atol=1e-5), \
+        f"h_embed norms should be 1.0, got mean={h_norms.mean():.6f}"
+    assert torch.allclose(t_norms, torch.ones_like(t_norms), atol=1e-5), \
+        f"t_embed norms should be 1.0, got mean={t_norms.mean():.6f}"
+    
+    # e_r should also be L2-normalized
+    e_r = F.normalize(model.relation_embed_k(model.r_list), p=2, dim=-1)
+    r_norms = e_r.norm(p=2, dim=-1)
+    assert torch.allclose(r_norms, torch.ones_like(r_norms), atol=1e-5), \
+        f"e_r norms should be 1.0, got mean={r_norms.mean():.6f}"
+    
+    print(f"  h_embed norms: mean={h_norms.mean():.6f}, std={h_norms.std():.6f} ✓")
+    print(f"  t_embed norms: mean={t_norms.mean():.6f}, std={t_norms.std():.6f} ✓")
+    print(f"  e_r norms:     mean={r_norms.mean():.6f}, std={r_norms.std():.6f} ✓")
     print("PASSED ✓")
 
 
@@ -241,7 +263,7 @@ if __name__ == '__main__':
     print()
     test_alpha_sum_to_one()
     print()
-    test_dist_normalize()
+    test_l2_normalization()
     
     print()
     print("=" * 60)

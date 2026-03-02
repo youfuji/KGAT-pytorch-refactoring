@@ -9,10 +9,12 @@ class T_AKDN(nn.Module):
     """
     T-AKDN: TransR-Enhanced Attention-based Knowledge-aware Deep Network.
 
-    Attention logit difference from AKDN:
-    - AKDN:   pi = LeakyReLU( e_r^T * W_k(cat(e_v, e_i)) )
-    - T-AKDN: pi = LeakyReLU( e_r^T * W_k(cat(e_{v,r}, e_{i,r})) ) - λ * ||e_{i,r} + e_r - e_{v,r}||^2
-      where e_{i,r} = M_r * e_i (TransR projection into relation-specific space R^k)
+    Hybrid attention logit:
+      1. L2-normalize e_i, e_v, e_r before TransR projection
+      2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
+      3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
+      4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
+      5. pi = s_sem - softplus(lambda_raw) * s_dist
     """
 
     def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
@@ -34,13 +36,8 @@ class T_AKDN(nn.Module):
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
         
-        # --- T-AKDN specific hyperparameters ---
-        self.dist_normalize = bool(args.dist_normalize)
-        self.learnable_lambda = bool(args.learnable_lambda)
-        if self.learnable_lambda:
-            self.lambda_raw = nn.Parameter(torch.tensor(0.0))
-        else:
-            self.lambda_kg = args.lambda_kg
+        # --- T-AKDN specific: learnable λ (always on) ---
+        self.lambda_raw = nn.Parameter(torch.tensor([-2.0], dtype=torch.float))
 
         # Entity + User Embedding (R^d)
         self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.embed_dim)
@@ -120,16 +117,20 @@ class T_AKDN(nn.Module):
     def _edge_softmax(self, logits):
         """
         Edge-level softmax per center node with proper autograd support.
-        torch.sparse.softmax は勾配を logits まで逆伝播しないため、
-        手動で scatter-based softmax を実装する。
         
         Args:
             logits: [E] attention logits per edge
         Returns:
             alpha: [E] normalized attention weights (sum-to-1 per center node)
         """
-        # Numerical stability: subtract global max (detached, no grad needed)
-        logits_stable = logits - logits.detach().max()
+        # Numerical stability: per-head max (if scatter_reduce is available) or clamp
+        try:
+            head_max = torch.zeros(self.n_entities, device=logits.device, dtype=logits.dtype).fill_(-1e9)
+            head_max.scatter_reduce_(0, self.h_list, logits.detach(), reduce='amax')
+            logits_stable = logits - head_max[self.h_list]
+        except AttributeError:
+            # Fallback for older PyTorch versions
+            logits_stable = torch.clamp(logits, min=-15.0, max=15.0)
         
         # Exponentiate
         exp_logits = torch.exp(logits_stable)
@@ -144,11 +145,14 @@ class T_AKDN(nn.Module):
 
     def _compute_kg_attention(self, e_entities_curr):
         """
-        TransR-Enhanced KG Attention (A_kg) を計算 (Differentiable)
+        Hybrid KG Attention (A_kg) を計算 (Differentiable)
         
         提案式:
-          pi(i,r,v) = LeakyReLU( e_r^T * W_k * cat(e_{v,r}, e_{i,r}) )
-                      - λ * ||e_{i,r} + e_r - e_{v,r}||^2
+          1. L2-normalize e_i, e_v, e_r
+          2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
+          3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
+          4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
+          5. pi = s_sem - softplus(lambda_raw) * s_dist
         
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, d)
@@ -156,18 +160,18 @@ class T_AKDN(nn.Module):
         k = self.transr_dim
         d = self.embed_dim
 
-        # 1. Embedding lookup
+        # 1. Embedding lookup + L2正規化 (Unit Sphere Constraint)
         # 重要: h = 中心ノード(self/head = e_i), t = 近傍(neighbor/tail = e_v)
         #   既存AKDNコメント: "Tailが近傍(neighbors)、Headが中心"
-        h_embed = e_entities_curr[self.h_list]   # [E, d]  ← center (e_i)
-        t_embed = e_entities_curr[self.t_list]   # [E, d]  ← neighbor (e_v)
+        h_embed = F.normalize(e_entities_curr[self.h_list], p=2, dim=-1)  # [E, d] center (e_i)
+        t_embed = F.normalize(e_entities_curr[self.t_list], p=2, dim=-1)  # [E, d] neighbor (e_v)
         
         # 2. TransR投影: e_{i,r} = M_r * e_i, e_{v,r} = M_r * e_v
         r_id = self.r_list                                          # [E]
         M = self.transr_proj(r_id).view(-1, k, d)                   # [E, k, d]
         e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)      # [E, k] center
         e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)      # [E, k] neighbor
-        e_r  = self.relation_embed_k(r_id)                          # [E, k]
+        e_r  = F.normalize(self.relation_embed_k(r_id), p=2, dim=-1)  # [E, k]
         
         # 3. Semantic score: LeakyReLU( e_r^T * W_k(cat(e_{v,r}, e_{i,r})) )
         # concat順は既存AKDNに合わせて [neighbor, center] = [e_vr, e_ir]
@@ -176,28 +180,21 @@ class T_AKDN(nn.Module):
         sem = torch.sum(q * e_r, dim=-1)                            # [E]
         sem = self.leakyrelu(sem)                                   # [E]
         
-        # 4. Distance term: ||e_{i,r} + e_r - e_{v,r}||^2
-        # TransR convention: head + relation ≈ tail
-        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1)         # [E]
-        if self.dist_normalize:
-            dist = dist / k
+        # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
+        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
         
-        # 5. Combined logit: pi = sem - λ * dist
-        if self.learnable_lambda:
-            lam = F.softplus(self.lambda_raw)
-        else:
-            lam = self.lambda_kg
-        
+        # 5. Combined logit: pi = sem - softplus(lambda_raw) * dist
+        lam = F.softplus(self.lambda_raw)                           # [1]
         attention_values = sem - lam * dist                         # [E]
         
-        # 6. Edge-level Softmax (autograd-compatible) & Sparse Matrix
-        # torch.sparse.softmax は勾配を values まで伝播しないため、
-        # 手動の edge softmax を使用して gradient flow を保証する
+        # 6. Edge-level Softmax & Sparse Matrix
         alpha = self._edge_softmax(attention_values)  # [E], sum-to-1 per center node
         
         A_kg = torch.sparse_coo_tensor(self.kg_indices, alpha,
                                        size=(self.n_entities, self.n_entities),
                                        device=self.kg_indices.device)
+        
+        A_kg = A_kg.coalesce()
         
         return A_kg
 

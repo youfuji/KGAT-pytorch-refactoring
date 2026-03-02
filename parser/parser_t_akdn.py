@@ -43,12 +43,6 @@ def parse_t_akdn_args():
     # --- T-AKDN specific hyperparameters ---
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
-    parser.add_argument('--lambda_kg', type=float, default=0.1,
-                        help='Weight for the TransR distance term in attention logit.')
-    parser.add_argument('--learnable_lambda', type=int, default=0,
-                        help='If 1, make lambda_kg a learnable parameter (softplus for positivity).')
-    parser.add_argument('--dist_normalize', type=int, default=0,
-                        help='If 1, normalize distance term by transr_dim (dist / k).')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
@@ -68,9 +62,9 @@ def parse_t_akdn_args():
     args = parser.parse_args()
 
     # T-AKDN用の保存ディレクトリ設定
-    save_dir = 'trained_model/T_AKDN/{}/embed-dim{}_relation-dim{}_transr-dim{}_lambda{}_lr{}_pretrain{}/'.format(
+    save_dir = 'trained_model/T_AKDN/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
         args.data_name, args.embed_dim, args.relation_dim, args.transr_dim,
-        args.lambda_kg, args.lr, args.use_pretrain)
+        args.lr, args.use_pretrain)
     args.save_dir = save_dir
 
     return args
