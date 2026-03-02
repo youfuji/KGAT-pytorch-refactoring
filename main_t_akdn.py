@@ -142,9 +142,11 @@ def train(args):
             total_loss += batch_loss.item()
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter))
+                lam_val = torch.nn.functional.softplus(model.lambda_raw).item()
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val))
         
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch))
+        lam_val = torch.nn.functional.softplus(model.lambda_raw).item()
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate
