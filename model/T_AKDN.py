@@ -187,14 +187,10 @@ class T_AKDN(nn.Module):
         lam = F.softplus(self.lambda_raw)                           # [1]
         attention_values = sem - lam * dist                         # [E]
         
-        # 6. Edge-level Softmax & Sparse Matrix
+        # 6. Edge-level Softmax
         alpha = self._edge_softmax(attention_values)  # [E], sum-to-1 per center node
         
-        A_kg = torch.sparse_coo_tensor(self.kg_indices, alpha,
-                                       size=(self.n_entities, self.n_entities),
-                                       device=self.kg_indices.device)
-        
-        return A_kg
+        return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）
 
     def fusion_gate(self, kg_embed, ig_embed):
         """
@@ -238,17 +234,25 @@ class T_AKDN(nn.Module):
         out = torch.sparse_coo_tensor(i, v, x.shape).to(x.device)
         return out * (1. / (1 - rate))
 
-    def _kg_aggregation(self, A_kg, e_entities_curr):
+    def _kg_aggregation(self, alpha, e_entities_curr):
         """
         KG Aggregation (Eq. 1)
         \\hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
+        
+        sparse.mm ではなく edge-level の scatter 演算を使用。
+        これにより alpha を通じて attention パラメータに勾配が流れる。
         """
+        # Edge dropout (edge-level)
         if self.training and self.edge_dropout_rate > 0.0:
-            A_kg_drop = self._sparse_dropout(A_kg, self.edge_dropout_rate, A_kg._nnz())
-        else:
-            A_kg_drop = A_kg
-
-        e_items_kg = torch.sparse.mm(A_kg_drop, e_entities_curr)
+            drop_mask = (torch.rand(alpha.size(0), device=alpha.device) >= self.edge_dropout_rate).float()
+            alpha = alpha * drop_mask / (1.0 - self.edge_dropout_rate)
+        
+        # Scatter-based aggregation: e_i = sum_j alpha_{ij} * e_j
+        neighbor_embed = e_entities_curr[self.t_list]                       # [E, d]
+        weighted = alpha.unsqueeze(-1) * neighbor_embed                    # [E, d]
+        e_items_kg = torch.zeros(self.n_entities, e_entities_curr.size(1),
+                                 device=e_entities_curr.device)
+        e_items_kg = e_items_kg.index_add(0, self.h_list, weighted)        # [N, d]
         
         return e_items_kg
 
@@ -296,10 +300,10 @@ class T_AKDN(nn.Module):
 
         for i in range(self.n_layers):
             # Step 0: TransR-Enhanced KG Attention
-            A_kg = self._compute_kg_attention(e_entities_curr)
+            alpha = self._compute_kg_attention(e_entities_curr)
 
             # 1. KG Aggregation (Eq. 1)
-            e_items_kg = self._kg_aggregation(A_kg, e_entities_curr)
+            e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
 
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
             e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
