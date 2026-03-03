@@ -113,8 +113,8 @@ def analyze_intermediate_gradients(model, data, device):
         d = model.embed_dim
 
         # 1. Embedding lookup + L2正規化
-        h_embed = F.normalize(e_entities_curr[model.h_list], p=2, dim=-1)
-        t_embed = F.normalize(e_entities_curr[model.t_list], p=2, dim=-1)
+        h_embed = F.normalize(e_entities_curr[model.h_list], p=2, dim=-1, eps=1e-5)
+        t_embed = F.normalize(e_entities_curr[model.t_list], p=2, dim=-1, eps=1e-5)
         h_embed.retain_grad(); intermediates[f'h_embed ({L})'] = h_embed
         t_embed.retain_grad(); intermediates[f't_embed ({L})'] = t_embed
 
@@ -129,7 +129,7 @@ def analyze_intermediate_gradients(model, data, device):
         e_ir.retain_grad(); intermediates[f'e_ir ({L})'] = e_ir
         e_vr.retain_grad(); intermediates[f'e_vr ({L})'] = e_vr
 
-        e_r = F.normalize(model.relation_embed_k(r_id), p=2, dim=-1)
+        e_r = F.normalize(model.relation_embed_k(r_id), p=2, dim=-1, eps=1e-5)
         e_r.retain_grad(); intermediates[f'e_r ({L})'] = e_r
 
         # 3. Semantic score

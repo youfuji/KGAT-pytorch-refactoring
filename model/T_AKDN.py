@@ -167,15 +167,15 @@ class T_AKDN(nn.Module):
         # 1. Embedding lookup + L2正規化 (Unit Sphere Constraint)
         # 重要: h = 中心ノード(self/head = e_i), t = 近傍(neighbor/tail = e_v)
         #   既存AKDNコメント: "Tailが近傍(neighbors)、Headが中心"
-        h_embed = F.normalize(e_entities_curr[self.h_list], p=2, dim=-1)  # [E, d] center (e_i)
-        t_embed = F.normalize(e_entities_curr[self.t_list], p=2, dim=-1)  # [E, d] neighbor (e_v)
+        h_embed = F.normalize(e_entities_curr[self.h_list], p=2, dim=-1, eps=1e-5)  # [E, d] center (e_i)
+        t_embed = F.normalize(e_entities_curr[self.t_list], p=2, dim=-1, eps=1e-5)  # [E, d] neighbor (e_v)
         
         # 2. TransR投影: e_{i,r} = M_r * e_i, e_{v,r} = M_r * e_v
         r_id = self.r_list                                          # [E]
         M = self.transr_proj(r_id).view(-1, k, d)                   # [E, k, d]
         e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)      # [E, k] center
         e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)      # [E, k] neighbor
-        e_r  = F.normalize(self.relation_embed_k(r_id), p=2, dim=-1)  # [E, k]
+        e_r  = F.normalize(self.relation_embed_k(r_id), p=2, dim=-1, eps=1e-5)  # [E, k]
         
         # 3. Semantic score: LeakyReLU( e_r^T * W_k(cat(e_{v,r}, e_{i,r})) )
         # concat順は既存AKDNに合わせて [neighbor, center] = [e_vr, e_ir]
@@ -256,6 +256,9 @@ class T_AKDN(nn.Module):
         e_items_kg = torch.zeros(self.n_entities, e_entities_curr.size(1),
                                  device=e_entities_curr.device)
         e_items_kg = e_items_kg.index_add(0, self.h_list, weighted)        # [N, d]
+        
+        # スケールリセット: 巨大勾配の前層逆流を防ぐ防波堤
+        e_items_kg = F.normalize(e_items_kg, p=2, dim=-1, eps=1e-5)
         
         return e_items_kg
 
