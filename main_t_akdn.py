@@ -101,7 +101,13 @@ def train(args):
     relations = list(data.train_relation_dict.keys())
     model.set_kg_structure(data.h_list.to(device), data.t_list.to(device), data.r_list.to(device), relations)
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # lambda_raw に専用の高い学習率を設定（softmax ヤコビアンによる勾配相殺を補う）
+    lambda_params = [p for n, p in model.named_parameters() if n == 'lambda_raw']
+    other_params = [p for n, p in model.named_parameters() if n != 'lambda_raw' and p.requires_grad]
+    optimizer = optim.Adam([
+        {'params': other_params, 'lr': args.lr},
+        {'params': lambda_params, 'lr': args.lambda_lr},
+    ])
 
     # initialize metrics
     best_epoch = -1

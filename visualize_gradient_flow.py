@@ -97,66 +97,70 @@ def analyze_intermediate_gradients(model, data, device):
 
     # 元のメソッドを保存
     original_compute = model._compute_kg_attention
+    call_counter = [0]  # リストで包んでクロージャ内から変更可能にする
 
     def patched_compute_kg_attention(e_entities_curr):
         """
         _compute_kg_attention のモンキーパッチ版。
         各中間テンソルに retain_grad() を設定し、辞書に格納する。
+        レイヤごとに異なるキーを使用。
         """
+        layer = call_counter[0]
+        call_counter[0] += 1
+        L = f'L{layer}'
+
         k = model.transr_dim
         d = model.embed_dim
 
         # 1. Embedding lookup + L2正規化
         h_embed = F.normalize(e_entities_curr[model.h_list], p=2, dim=-1)
         t_embed = F.normalize(e_entities_curr[model.t_list], p=2, dim=-1)
-        h_embed.retain_grad(); intermediates['h_embed'] = h_embed
-        t_embed.retain_grad(); intermediates['t_embed'] = t_embed
+        h_embed.retain_grad(); intermediates[f'h_embed ({L})'] = h_embed
+        t_embed.retain_grad(); intermediates[f't_embed ({L})'] = t_embed
 
-        # 2. TransR投影
+        # 2. TransR投影（1回だけ呼び出し）
         r_id = model.r_list
-        M = model.transr_proj(r_id).view(-1, k, d)
         M_flat = model.transr_proj(r_id)
-        M_flat.retain_grad(); intermediates['M (transr_proj output)'] = M_flat
+        M_flat.retain_grad(); intermediates[f'M ({L})'] = M_flat
+        M = M_flat.view(-1, k, d)
 
         e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)
         e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)
-        e_ir.retain_grad(); intermediates['e_ir (projected head)'] = e_ir
-        e_vr.retain_grad(); intermediates['e_vr (projected tail)'] = e_vr
+        e_ir.retain_grad(); intermediates[f'e_ir ({L})'] = e_ir
+        e_vr.retain_grad(); intermediates[f'e_vr ({L})'] = e_vr
 
         e_r = F.normalize(model.relation_embed_k(r_id), p=2, dim=-1)
-        e_r.retain_grad(); intermediates['e_r (relation embed k)'] = e_r
+        e_r.retain_grad(); intermediates[f'e_r ({L})'] = e_r
 
         # 3. Semantic score
         cat_embed = torch.cat([e_vr, e_ir], dim=-1)
-        cat_embed.retain_grad(); intermediates['cat_embed'] = cat_embed
+        cat_embed.retain_grad(); intermediates[f'cat_embed ({L})'] = cat_embed
 
         q = model.W_k(cat_embed)
-        q.retain_grad(); intermediates['q (W_k output)'] = q
+        q.retain_grad(); intermediates[f'q ({L})'] = q
 
         sem = torch.sum(q * e_r, dim=-1)
-        sem.retain_grad(); intermediates['sem (before leakyrelu)'] = sem
+        sem.retain_grad(); intermediates[f'sem_pre ({L})'] = sem
 
         sem = model.leakyrelu(sem)
-        sem.retain_grad(); intermediates['sem (after leakyrelu)'] = sem
+        sem.retain_grad(); intermediates[f'sem_post ({L})'] = sem
 
         # 4. Distance
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
-        dist.retain_grad(); intermediates['dist'] = dist
+        dist.retain_grad(); intermediates[f'dist ({L})'] = dist
 
         # 5. Combined logit
         lam = F.softplus(model.lambda_raw)
-        intermediates['lambda (softplus)'] = lam
-        # lam はスカラー/小テンソルなので retain_grad 可能
-        lam.retain_grad()
+        lam.retain_grad(); intermediates[f'lambda ({L})'] = lam
 
         attention_values = sem - lam * dist
-        attention_values.retain_grad(); intermediates['attention_values (pi)'] = attention_values
+        attention_values.retain_grad(); intermediates[f'pi ({L})'] = attention_values
 
         # 6. Edge softmax
         alpha = model._edge_softmax(attention_values)
-        alpha.retain_grad(); intermediates['alpha (after softmax)'] = alpha
+        alpha.retain_grad(); intermediates[f'alpha ({L})'] = alpha
 
-        return alpha  # [E] — sparse tensor を作らず直接返す
+        return alpha
 
     # パッチ適用
     model._compute_kg_attention = patched_compute_kg_attention
@@ -413,6 +417,7 @@ def main():
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5)
     parser.add_argument('--transr_dim', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--lambda_lr', type=float, default=0.01)
     parser.add_argument('--Ks', nargs='?', default='[20]')
 
     # 勾配可視化専用の引数
@@ -473,7 +478,13 @@ def main():
         data.r_list.to(device), relations
     )
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # lambda_raw に専用の高い学習率を設定
+    lambda_params = [p for n, p in model.named_parameters() if n == 'lambda_raw']
+    other_params = [p for n, p in model.named_parameters() if n != 'lambda_raw' and p.requires_grad]
+    optimizer = optim.Adam([
+        {'params': other_params, 'lr': args.lr},
+        {'params': lambda_params, 'lr': args.lambda_lr},
+    ])
 
     # ウォームアップ学習
     if args.n_warmup_epochs > 0:
