@@ -156,13 +156,7 @@ def analyze_intermediate_gradients(model, data, device):
         alpha = model._edge_softmax(attention_values)
         alpha.retain_grad(); intermediates['alpha (after softmax)'] = alpha
 
-        # 7. Sparse matrix
-        A_kg = torch.sparse_coo_tensor(model.kg_indices, alpha,
-                                       size=(model.n_entities, model.n_entities),
-                                       device=model.kg_indices.device)
-        intermediates['A_kg (sparse)'] = A_kg  # sparse は retain_grad できない
-
-        return A_kg
+        return alpha  # [E] — sparse tensor を作らず直接返す
 
     # パッチ適用
     model._compute_kg_attention = patched_compute_kg_attention
@@ -280,10 +274,10 @@ def analyze_get_embeddings_flow(model, data, device):
 
         for i in range(model.n_layers):
             # KG Attention
-            A_kg = model._compute_kg_attention(e_entities_curr)
+            alpha = model._compute_kg_attention(e_entities_curr)
 
             # KG Aggregation
-            e_items_kg = model._kg_aggregation(A_kg, e_entities_curr)
+            e_items_kg = model._kg_aggregation(alpha, e_entities_curr)
             e_items_kg.retain_grad()
             intermediates[f'e_items_kg (layer {i})'] = e_items_kg
 
