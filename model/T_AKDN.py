@@ -14,7 +14,7 @@ class T_AKDN(nn.Module):
       2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
       3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
       4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-      5. pi = s_sem - softplus(lambda_raw) * s_dist
+      5. pi = s_sem - λ * s_dist   (λ is annealed, not learned)
     """
 
     def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
@@ -36,8 +36,8 @@ class T_AKDN(nn.Module):
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
         
-        # --- T-AKDN specific: learnable λ (always on) ---
-        self.lambda_raw = nn.Parameter(torch.tensor([-2.0], dtype=torch.float))
+        # --- T-AKDN specific: λ (annealing, not learned) ---
+        self.register_buffer('lambda_val', torch.tensor([0.0], dtype=torch.float))
 
         # Entity + User Embedding (R^d)
         self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.embed_dim)
@@ -99,6 +99,10 @@ class T_AKDN(nn.Module):
         
         # Ablation Control
         self.gate_control = 'normal'  # 'normal', 'kg_only', 'ig_only'
+
+    def set_lambda(self, value):
+        """λ の値を外部から設定（アニーリング用）"""
+        self.lambda_val.fill_(value)
 
     def set_kg_structure(self, h_list, t_list, r_list, relations):
         """
@@ -183,9 +187,8 @@ class T_AKDN(nn.Module):
         # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
         
-        # 5. Combined logit: pi = sem - softplus(lambda_raw) * dist
-        lam = F.softplus(self.lambda_raw)                           # [1]
-        attention_values = sem - lam * dist                         # [E]
+        # 5. Combined logit: pi = sem - λ * dist  (λ is annealed)
+        attention_values = sem - self.lambda_val * dist             # [E]
         
         # 6. Edge-level Softmax
         alpha = self._edge_softmax(attention_values)  # [E], sum-to-1 per center node
@@ -299,17 +302,22 @@ class T_AKDN(nn.Module):
             self.gate_kg = []
 
         for i in range(self.n_layers):
-            # Step 0: TransR-Enhanced KG Attention
-            alpha = self._compute_kg_attention(e_entities_curr)
+            # KG Attention + Aggregation + Fusion (最終層はスキップ: dead-end 回避)
+            if i < self.n_layers - 1:
+                # Step 0: TransR-Enhanced KG Attention
+                alpha = self._compute_kg_attention(e_entities_curr)
 
-            # 1. KG Aggregation (Eq. 1)
-            e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
+                # 1. KG Aggregation (Eq. 1)
+                e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
 
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
             e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
             
-            # 3. Fusion Gate (Eq. 4, 5)
-            e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
+            # 3. Fusion Gate (Eq. 4, 5) — 最終層はIG出力をそのまま使用
+            if i < self.n_layers - 1:
+                e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
+            else:
+                e_items_dual_new = e_items_collab
             
             # 4. Message Dropout
             if self.mess_dropout[i] > 0.0:
@@ -324,7 +332,8 @@ class T_AKDN(nn.Module):
             e_users_curr = e_users_new
             
             # KG側入力の更新 (論文準拠: KG側にIGの情報は含まない)
-            e_entities_curr = e_items_kg 
+            if i < self.n_layers - 1:
+                e_entities_curr = e_items_kg 
             
 
         # 最終表現 (Eq. 7)

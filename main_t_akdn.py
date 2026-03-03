@@ -101,13 +101,7 @@ def train(args):
     relations = list(data.train_relation_dict.keys())
     model.set_kg_structure(data.h_list.to(device), data.t_list.to(device), data.r_list.to(device), relations)
 
-    # lambda_raw に専用の高い学習率を設定（softmax ヤコビアンによる勾配相殺を補う）
-    lambda_params = [p for n, p in model.named_parameters() if n == 'lambda_raw']
-    other_params = [p for n, p in model.named_parameters() if n != 'lambda_raw' and p.requires_grad]
-    optimizer = optim.Adam([
-        {'params': other_params, 'lr': args.lr},
-        {'params': lambda_params, 'lr': args.lambda_lr},
-    ])
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # initialize metrics
     best_epoch = -1
@@ -124,6 +118,11 @@ def train(args):
     for epoch in range(1, args.n_epoch + 1):
         time0 = time()
         model.train()
+
+        # Lambda annealing
+        progress = min(epoch / args.lambda_anneal_epochs, 1.0)
+        lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+        model.set_lambda(lam_val)
 
         time_cf = time()
         total_loss = 0
@@ -143,15 +142,14 @@ def train(args):
                 sys.exit()
 
             batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             optimizer.zero_grad()
             total_loss += batch_loss.item()
 
             if (iter % args.cf_print_every) == 0:
-                lam_val = torch.nn.functional.softplus(model.lambda_raw).item()
                 logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val))
         
-        lam_val = torch.nn.functional.softplus(model.lambda_raw).item()
         logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 

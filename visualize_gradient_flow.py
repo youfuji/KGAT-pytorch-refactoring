@@ -149,9 +149,9 @@ def analyze_intermediate_gradients(model, data, device):
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
         dist.retain_grad(); intermediates[f'dist ({L})'] = dist
 
-        # 5. Combined logit
-        lam = F.softplus(model.lambda_raw)
-        lam.retain_grad(); intermediates[f'lambda ({L})'] = lam
+        # 5. Combined logit (lambda is annealed, not learned)
+        lam = model.lambda_val.clone()
+        intermediates[f'lambda ({L})'] = lam
 
         attention_values = sem - lam * dist
         attention_values.retain_grad(); intermediates[f'pi ({L})'] = attention_values
@@ -220,19 +220,10 @@ def analyze_intermediate_gradients(model, data, device):
 
         prev_had_grad = has_grad
 
-    # lambda_raw の勾配を特別にチェック
+    # lambda 情報表示
     print()
-    print("  --- lambda_raw 特別診断 ---")
-    if model.lambda_raw.grad is not None:
-        print(f"  lambda_raw.grad      = {model.lambda_raw.grad.item():.10f}")
-        print(f"  lambda_raw.value     = {model.lambda_raw.item():.6f}")
-        print(f"  lambda (softplus)    = {F.softplus(model.lambda_raw).item():.6f}")
-        if abs(model.lambda_raw.grad.item()) < 1e-10:
-            print("  ⚠️  lambda_raw の勾配が実質ゼロ — dist の寄与が極小の可能性")
-        else:
-            print("  ✅ lambda_raw に勾配が流れている")
-    else:
-        print("  ❌ lambda_raw に勾配が流れていない!")
+    print(f"  --- lambda (annealing) ---")
+    print(f"  lambda_val = {model.lambda_val.item():.6f}")
 
     if grad_flow_broken_at:
         print(f"\n  ★ 勾配切断ポイント: {grad_flow_broken_at}")
@@ -277,21 +268,23 @@ def analyze_get_embeddings_flow(model, data, device):
         e_entities_curr = e_entities
 
         for i in range(model.n_layers):
-            # KG Attention
-            alpha = model._compute_kg_attention(e_entities_curr)
-
-            # KG Aggregation
-            e_items_kg = model._kg_aggregation(alpha, e_entities_curr)
-            e_items_kg.retain_grad()
-            intermediates[f'e_items_kg (layer {i})'] = e_items_kg
+            # KG Attention + Aggregation (最終層はスキップ)
+            if i < model.n_layers - 1:
+                alpha = model._compute_kg_attention(e_entities_curr)
+                e_items_kg = model._kg_aggregation(alpha, e_entities_curr)
+                e_items_kg.retain_grad()
+                intermediates[f'e_items_kg (layer {i})'] = e_items_kg
 
             # IG Aggregation
             e_items_collab, e_users_new = model._ig_aggregation(e_items_dual, e_users_curr)
             e_items_collab.retain_grad(); intermediates[f'e_items_collab (layer {i})'] = e_items_collab
             e_users_new.retain_grad(); intermediates[f'e_users_new (layer {i})'] = e_users_new
 
-            # Fusion Gate
-            e_items_dual_new = model.fusion_gate(e_items_kg, e_items_collab)
+            # Fusion Gate (最終層はIG出力をそのまま使用)
+            if i < model.n_layers - 1:
+                e_items_dual_new = model.fusion_gate(e_items_kg, e_items_collab)
+            else:
+                e_items_dual_new = e_items_collab
             e_items_dual_new.retain_grad()
             intermediates[f'e_items_fused (layer {i})'] = e_items_dual_new
 
@@ -306,7 +299,8 @@ def analyze_get_embeddings_flow(model, data, device):
             
             e_items_dual = e_items_dual_new
             e_users_curr = e_users_new
-            e_entities_curr = e_items_kg
+            if i < model.n_layers - 1:
+                e_entities_curr = e_items_kg
 
         # 最終表現
         item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)
@@ -417,7 +411,9 @@ def main():
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5)
     parser.add_argument('--transr_dim', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--lambda_lr', type=float, default=0.01)
+    parser.add_argument('--lambda_init', type=float, default=0.0)
+    parser.add_argument('--lambda_final', type=float, default=1.0)
+    parser.add_argument('--lambda_anneal_epochs', type=int, default=50)
     parser.add_argument('--Ks', nargs='?', default='[20]')
 
     # 勾配可視化専用の引数
@@ -478,13 +474,7 @@ def main():
         data.r_list.to(device), relations
     )
 
-    # lambda_raw に専用の高い学習率を設定
-    lambda_params = [p for n, p in model.named_parameters() if n == 'lambda_raw']
-    other_params = [p for n, p in model.named_parameters() if n != 'lambda_raw' and p.requires_grad]
-    optimizer = optim.Adam([
-        {'params': other_params, 'lr': args.lr},
-        {'params': lambda_params, 'lr': args.lambda_lr},
-    ])
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # ウォームアップ学習
     if args.n_warmup_epochs > 0:
@@ -496,6 +486,11 @@ def main():
         
         for epoch in range(1, args.n_warmup_epochs + 1):
             model.train()
+            # Lambda annealing
+            progress = min(epoch / args.lambda_anneal_epochs, 1.0)
+            lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+            model.set_lambda(lam_val)
+
             total_loss = 0
             for iter_i in range(1, n_batch + 1):
                 cf_batch_user, cf_batch_pos_item, cf_batch_neg_item = data.generate_cf_batch(
@@ -507,11 +502,11 @@ def main():
 
                 batch_loss = model.calc_loss(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
                 batch_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 total_loss += batch_loss.item()
 
-            lam_val = F.softplus(model.lambda_raw).item()
             print(f"  Epoch {epoch}/{args.n_warmup_epochs} | Mean Loss: {total_loss / n_batch:.4f} | Lambda: {lam_val:.6f}")
 
     # ============================================================
@@ -520,7 +515,7 @@ def main():
     print(f"\n{'#'*80}")
     print(f"# 勾配フロー分析開始")
     print(f"# data_name={args.data_name}, warmup_epochs={args.n_warmup_epochs}")
-    print(f"# lambda_raw={model.lambda_raw.item():.6f}, lambda(softplus)={F.softplus(model.lambda_raw).item():.6f}")
+    print(f"# lambda_val={model.lambda_val.item():.6f}")
     print(f"{'#'*80}")
 
     # 分析1: パラメータ別勾配ノルム
