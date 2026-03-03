@@ -125,13 +125,44 @@ class AKDN(nn.Module):
         # Sparse Matrix用インデックス (2, n_edges)
         self.kg_indices = torch.stack([h_list, t_list], dim=0)
 
+    def _edge_softmax(self, logits):
+        """
+        Edge-level softmax per center node with proper autograd support.
+        
+        Args:
+            logits: [E] attention logits per edge
+        Returns:
+            alpha: [E] normalized attention weights (sum-to-1 per center node)
+        """
+        # Numerical stability: per-head max subtraction
+        try:
+            head_max = torch.zeros(self.n_entities, device=logits.device, dtype=logits.dtype).fill_(-1e9)
+            head_max.scatter_reduce_(0, self.h_list, logits.detach(), reduce='amax')
+            logits_stable = logits - head_max[self.h_list]
+        except AttributeError:
+            # Fallback for older PyTorch versions
+            logits_stable = torch.clamp(logits, min=-15.0, max=15.0)
+        
+        # Exponentiate
+        exp_logits = torch.exp(logits_stable)
+        
+        # Per-center-node sum (out-of-place index_add for proper autograd)
+        sum_exp = torch.zeros(self.n_entities, device=logits.device, dtype=logits.dtype)
+        sum_exp = sum_exp.index_add(0, self.h_list, exp_logits)
+        
+        # Normalize
+        alpha = exp_logits / (sum_exp[self.h_list] + 1e-16)
+        return alpha
+
     def _compute_kg_attention(self, e_entities_curr):
         """
-        KG Attention (A_kg) を計算 (Differentiable)
+        KG Attention を計算 (Differentiable)
         パラメータ W_k, relation_embed, entity_user_embed の勾配が伝播するように計算を行う
         
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, dim)
+        Returns:
+            alpha: [E] edge-level attention weights
         """
         # 1. Embedding lookup
         h_embed = e_entities_curr[self.h_list]
@@ -154,17 +185,10 @@ class AKDN(nn.Module):
         # Activation
         attention_values = self.leakyrelu(attention_logits)
         
-        # 3. Create Sparse Matrix & Softmax
-        # Sparse Tensor作成 (Valuesに勾配が乗る)
-        A_kg_unorm = torch.sparse_coo_tensor(self.kg_indices, attention_values, 
-                                             size=(self.n_entities, self.n_entities), 
-                                             device=self.kg_indices.device)
+        # 3. Edge Softmax (per-head normalization)
+        alpha = self._edge_softmax(attention_values)
         
-        # Softmax Normalization (Row-wise)
-        # Note: torch.sparse.softmax は dim=1 (row) に対して正規化を行う
-        A_kg = torch.sparse.softmax(A_kg_unorm, dim=1)
-        
-        return A_kg
+        return alpha  # [E]
 
 
 
@@ -213,19 +237,24 @@ class AKDN(nn.Module):
         out = torch.sparse_coo_tensor(i, v, x.shape).to(x.device)
         return out * (1. / (1 - rate))
 
-    def _kg_aggregation(self, A_kg, e_entities_curr):
+    def _kg_aggregation(self, alpha, e_entities_curr):
         """
         KG Aggregation (Eq. 1)
         \hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
+        
+        scatter 演算を使用し、alpha を通じて attention パラメータに勾配が流れる。
         """
-        # Regularization: Edge Dropout (Apply only during training)
+        # Edge dropout (edge-level)
         if self.training and self.edge_dropout_rate > 0.0:
-            A_kg_drop = self._sparse_dropout(A_kg, self.edge_dropout_rate, A_kg._nnz())
-        else:
-            A_kg_drop = A_kg
-
-        # Sparse MM: (n_ent, n_ent) x (n_ent, dim) -> (n_ent, dim)
-        e_items_kg = torch.sparse.mm(A_kg_drop, e_entities_curr)
+            drop_mask = (torch.rand(alpha.size(0), device=alpha.device) >= self.edge_dropout_rate).float()
+            alpha = alpha * drop_mask / (1.0 - self.edge_dropout_rate)
+        
+        # Scatter-based aggregation: e_i = sum_j alpha_{ij} * e_j
+        neighbor_embed = e_entities_curr[self.t_list]                       # [E, d]
+        weighted = alpha.unsqueeze(-1) * neighbor_embed                    # [E, d]
+        e_items_kg = torch.zeros(self.n_entities, e_entities_curr.size(1),
+                                 device=e_entities_curr.device)
+        e_items_kg = e_items_kg.index_add(0, self.h_list, weighted)        # [N, d]
         
         return e_items_kg
 
@@ -291,49 +320,40 @@ class AKDN(nn.Module):
             self.gate_kg = []
 
         for i in range(self.n_layers):
-            # Step 0: KG Attention Matrixの計算 (Dynamic & Adaptive)
-            # 現在の層のEmbedding (e_entities_curr) に基づいてAttentionを再計算
-            A_kg = self._compute_kg_attention(e_entities_curr)
+            # KG Attention + Aggregation (最終層はスキップ: dead-end 回避)
+            if i < self.n_layers - 1:
+                # Step 0: KG Attention の計算 (Dynamic & Adaptive)
+                alpha = self._compute_kg_attention(e_entities_curr)
 
-            # 1. KG Aggregation (Eq. 1)
-            e_items_kg = self._kg_aggregation(A_kg, e_entities_curr)
+                # 1. KG Aggregation (Eq. 1)
+                e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
 
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
             e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
             
-            # 3. Fusion Gate (Eq. 4, 5)
-            e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
+            # 3. Fusion Gate (Eq. 4, 5) — 最終層はIG出力をそのまま使用
+            if i < self.n_layers - 1:
+                e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
+            else:
+                e_items_dual_new = e_items_collab
             
-            # -----------------------------------------------------
-            # ストック & 更新
-            # -----------------------------------------------------
             # 4. Message Dropout
-            # 次の層への入力および最終表現のストックに使用する値に対して一貫してDropoutを適用
             if self.mess_dropout[i] > 0.0:
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
                  e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
-                 # e_items_kg = F.dropout(e_items_kg, p=self.mess_dropout[i], training=self.training) # Used only for fusion
 
-            # -----------------------------------------------------
             # ストック & 更新
-            # -----------------------------------------------------
-            # 予測・Loss計算用には IG由来(Collaborative) のItem表現を使う (論文Source 216)
             item_collab_embeds_list.append(e_items_collab)
             user_embeds_list.append(e_users_new)
             
-            # 次の層への入力更新 (Dropout適用後の値を使用)
+            # 次の層への入力更新
             e_items_dual = e_items_dual_new
             e_users_curr = e_users_new
             
-            # [重要変更]: KG側入力の更新
-            # 以前は e_entities_curr = e_items_kg だったが、これだとIG側の情報がKGに伝わらない。
-            # Fusionされた情報 (e_items_dual_new) を次のKG入力とすることで、
-            # Userの嗜好情報がKG上のEntityへも伝播するようにする (Information Diffusion)
-            # e_entities_curr = e_items_dual_new
-
-            # 論文では、KG側の情報にIGの情報は含まれない。
-            e_entities_curr = e_items_kg 
+            # KG側入力の更新 (論文準拠: KG側にIGの情報は含まない)
+            if i < self.n_layers - 1:
+                e_entities_curr = e_items_kg 
             
 
         # 最終表現 (Eq. 7)
