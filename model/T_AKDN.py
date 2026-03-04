@@ -258,7 +258,7 @@ class T_AKDN(nn.Module):
         e_items_kg = e_items_kg.index_add(0, self.h_list, weighted)        # [N, d]
         
         # スケールリセット: 巨大勾配の前層逆流を防ぐ防波堤
-        e_items_kg = F.normalize(e_items_kg, p=2, dim=-1, eps=1e-5)
+        # e_items_kg = F.normalize(e_items_kg, p=2, dim=-1, eps=1e-5)
         
         return e_items_kg
 
