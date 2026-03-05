@@ -412,8 +412,9 @@ def main():
     parser.add_argument('--transr_dim', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--lambda_init', type=float, default=0.0)
-    parser.add_argument('--lambda_final', type=float, default=1.0)
-    parser.add_argument('--lambda_anneal_epochs', type=int, default=50)
+    parser.add_argument('--lambda_final', type=float, default=0.5)
+    parser.add_argument('--lambda_warmup_epochs', type=int, default=100)
+    parser.add_argument('--lambda_anneal_epochs', type=int, default=400)
     parser.add_argument('--Ks', nargs='?', default='[20]')
 
     # 勾配可視化専用の引数
@@ -486,9 +487,14 @@ def main():
         
         for epoch in range(1, args.n_warmup_epochs + 1):
             model.train()
-            # Lambda annealing
-            progress = min(epoch / args.lambda_anneal_epochs, 1.0)
-            lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+            # 3-phase Lambda annealing
+            if epoch <= args.lambda_warmup_epochs:
+                lam_val = args.lambda_init
+            elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
+                progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
+                lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+            else:
+                lam_val = args.lambda_final
             model.set_lambda(lam_val)
 
             total_loss = 0

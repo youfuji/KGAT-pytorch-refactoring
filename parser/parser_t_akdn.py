@@ -47,11 +47,13 @@ def parse_t_akdn_args():
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
     parser.add_argument('--lambda_init', type=float, default=0.0,
-                        help='Initial lambda value for annealing (0 = sem only).')
-    parser.add_argument('--lambda_final', type=float, default=1.0,
-                        help='Final lambda value for annealing.')
-    parser.add_argument('--lambda_anneal_epochs', type=int, default=50,
-                        help='Number of epochs to anneal lambda from init to final.')
+                        help='Phase 1 lambda value (warmup, sem only).')
+    parser.add_argument('--lambda_final', type=float, default=0.5,
+                        help='Phase 2-3 lambda target value (saturation).')
+    parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
+                        help='Phase 1: epochs with lambda=init (no dist penalty).')
+    parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
+                        help='Phase 2: epochs to linearly anneal lambda from init to final.')
     parser.add_argument('--n_epoch', type=int, default=500,
                         help='Number of epoch.')
     parser.add_argument('--stopping_steps', type=int, default=10,

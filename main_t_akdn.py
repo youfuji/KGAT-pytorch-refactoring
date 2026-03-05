@@ -119,9 +119,15 @@ def train(args):
         time0 = time()
         model.train()
 
-        # Lambda annealing
-        progress = min(epoch / args.lambda_anneal_epochs, 1.0)
-        lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+        # 3-phase Lambda annealing
+        # Phase 1: warmup (λ=init) → Phase 2: linear anneal → Phase 3: saturation (λ=final)
+        if epoch <= args.lambda_warmup_epochs:
+            lam_val = args.lambda_init
+        elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
+            progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
+            lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+        else:
+            lam_val = args.lambda_final
         model.set_lambda(lam_val)
 
         time_cf = time()
