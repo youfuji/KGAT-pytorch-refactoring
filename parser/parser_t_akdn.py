@@ -48,14 +48,8 @@ def parse_t_akdn_args():
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
-    parser.add_argument('--lambda_init', type=float, default=0.0,
-                        help='Phase 1 lambda value (warmup, sem only).')
-    parser.add_argument('--lambda_final', type=float, default=0.5,
-                        help='Phase 2-3 lambda target value (saturation).')
-    parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
-                        help='Phase 1: epochs with lambda=init (no dist penalty).')
-    parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
-                        help='Phase 2: epochs to linearly anneal lambda from init to final.')
+    parser.add_argument('--lambda_att', type=float, default=0.5,
+                        help='Lambda value for TransR distance penalty in attention (fixed, no annealing).')
 
     # --- KGE multi-task learning ---
     parser.add_argument('--kge_lambda', type=float, default=0.1,
@@ -87,7 +81,7 @@ def parse_t_akdn_args():
     args = parser.parse_args()
 
     # T-AKDN用の保存ディレクトリ設定
-    save_dir = 'trained_model/T_AKDN/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
+    save_dir = 'trained_model/T_AKDN_KGELOSS/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
         args.data_name, args.embed_dim, args.relation_dim, args.transr_dim,
         args.lr, args.use_pretrain)
     args.save_dir = save_dir

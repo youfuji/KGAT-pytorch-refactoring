@@ -121,15 +121,8 @@ def train(args):
         time0 = time()
         model.train()
 
-        # 3-phase Lambda annealing
-        # Phase 1: warmup (λ=init) → Phase 2: linear anneal → Phase 3: saturation (λ=final)
-        if epoch <= args.lambda_warmup_epochs:
-            lam_val = args.lambda_init
-        elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
-            progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
-            lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
-        else:
-            lam_val = args.lambda_final
+        # Fixed lambda attention penalty
+        lam_val = args.lambda_att
         model.set_lambda(lam_val)
 
         time_cf = time()
@@ -174,11 +167,11 @@ def train(args):
             total_kge_loss += kge_loss.item()
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Total {:.4f} | CF {:.4f} | KGE {:.4f} | Lambda {:.4f}'.format(
-                    epoch, iter, n_batch, time() - time_iter, batch_loss.item(), cf_loss.item(), kge_loss.item(), lam_val))
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Total {:.4f} | CF {:.4f} | KGE {:.4f}'.format(
+                    epoch, iter, n_batch, time() - time_iter, batch_loss.item(), cf_loss.item(), kge_loss.item()))
         
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Mean Loss {:.4f} | Lambda {:.4f}'.format(
-            epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Mean Loss {:.4f}'.format(
+            epoch, n_batch, time() - time_cf, total_loss / n_batch))
         logging.info('--- Group 1 (Loss) ---  BPR: {:.4f} | KGE: {:.4f}'.format(
             total_cf_loss / n_batch, total_kge_loss / n_batch))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
