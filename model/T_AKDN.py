@@ -35,6 +35,7 @@ class T_AKDN(nn.Module):
         self.n_layers = len(eval(args.conv_dim_list))
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
+        self.tau = args.tau  # Attention softmax temperature
         
         # --- T-AKDN specific: λ (annealing, not learned) ---
         self.register_buffer('lambda_val', torch.tensor([0.0], dtype=torch.float))
@@ -118,12 +119,13 @@ class T_AKDN(nn.Module):
         # Sparse Matrix用インデックス (2, n_edges)
         self.kg_indices = torch.stack([h_list, t_list], dim=0)
 
-    def _edge_softmax(self, logits):
+    def _edge_softmax(self, logits, tau=1.0):
         """
         Edge-level softmax per center node with proper autograd support.
         
         Args:
             logits: [E] attention logits per edge
+            tau: temperature parameter for sharpness control
         Returns:
             alpha: [E] normalized attention weights (sum-to-1 per center node)
         """
@@ -131,10 +133,10 @@ class T_AKDN(nn.Module):
         try:
             head_max = torch.zeros(self.n_entities, device=logits.device, dtype=logits.dtype).fill_(-1e9)
             head_max.scatter_reduce_(0, self.h_list, logits.detach(), reduce='amax')
-            logits_stable = logits - head_max[self.h_list]
+            logits_stable = (logits - head_max[self.h_list]) / tau
         except AttributeError:
             # Fallback for older PyTorch versions
-            logits_stable = torch.clamp(logits, min=-15.0, max=15.0)
+            logits_stable = torch.clamp(logits / tau, min=-15.0, max=15.0)
         
         # Exponentiate
         exp_logits = torch.exp(logits_stable)
@@ -156,7 +158,8 @@ class T_AKDN(nn.Module):
           2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
           3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
           4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-          5. pi = s_sem - softplus(lambda_raw) * s_dist
+          5. d_tilde = Z-score(s_dist)  per center node
+          6. pi = s_sem - λ * d_tilde
         
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, d)
@@ -187,11 +190,28 @@ class T_AKDN(nn.Module):
         # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
         
-        # 5. Combined logit: pi = sem - λ * dist  (λ is annealed)
-        attention_values = sem - self.lambda_val * dist             # [E]
+        # 5. ★ Z-score normalization per center node (近傍内Z変換)
+        #    Softmax による距離ペナルティの相殺を防ぐため、
+        #    中心ノード i の近傍集合内で距離を標準化する
+        ones = torch.ones_like(dist)
+        count = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
+        count = count.index_add(0, self.h_list, ones).clamp(min=1)  # [N]
         
-        # 6. Edge-level Softmax
-        alpha = self._edge_softmax(attention_values)  # [E], sum-to-1 per center node
+        mu = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
+        mu = mu.index_add(0, self.h_list, dist) / count             # [N] 近傍平均
+        
+        diff_sq = (dist - mu[self.h_list]) ** 2                     # [E]
+        var = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
+        var = var.index_add(0, self.h_list, diff_sq) / count        # [N] 近傍分散
+        sigma = var.sqrt()                                          # [N] 近傍標準偏差
+        
+        d_tilde = (dist - mu[self.h_list]) / (sigma[self.h_list] + 1e-8)  # [E] 標準化距離
+        
+        # 6. Combined logit: pi = sem - λ * d_tilde  (λ is annealed)
+        attention_values = sem - self.lambda_val * d_tilde           # [E]
+        
+        # 7. Edge-level Softmax with temperature τ
+        alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
         
         return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）
 
@@ -350,6 +370,8 @@ class T_AKDN(nn.Module):
             return self.calc_score(*input)
         if mode == 'calc_loss':
             return self.calc_loss(*input)
+        if mode == 'calc_kge_loss':
+            return self.calc_kge_loss(*input)
         if mode == 'update_att':
             return self.update_attention(*input)
 
@@ -377,3 +399,48 @@ class T_AKDN(nn.Module):
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
         return cf_loss + self.cf_l2loss_lambda * l2_loss
+
+    def calc_kge_loss(self, h, r, pos_t, neg_t):
+        """
+        ★ KGE Pairwise Ranking Loss (TransR空間)
+        
+        TransR投影を用いて正例トリプレットの距離が負例より小さくなるよう最適化:
+          L_KGE = mean( softplus( d(h,r,t) - d(h,r,t') ) )
+        
+        Args:
+            h:     [B] head entity indices
+            r:     [B] relation indices
+            pos_t: [B] positive tail entity indices
+            neg_t: [B] negative tail entity indices
+        Returns:
+            kge_loss: scalar
+            l2_loss:  scalar (KGE用 L2 正則化、未加重)
+        """
+        k = self.transr_dim
+        d = self.embed_dim
+        all_embed = self.entity_user_embed.weight
+        
+        # L2正規化 (Unit Sphere Constraint)
+        h_e  = F.normalize(all_embed[h],     p=2, dim=-1, eps=1e-5)  # [B, d]
+        pt_e = F.normalize(all_embed[pos_t], p=2, dim=-1, eps=1e-5)  # [B, d]
+        nt_e = F.normalize(all_embed[neg_t], p=2, dim=-1, eps=1e-5)  # [B, d]
+        
+        # TransR射影
+        M   = self.transr_proj(r).view(-1, k, d)                     # [B, k, d]
+        e_r = F.normalize(self.relation_embed_k(r), p=2, dim=-1, eps=1e-5)  # [B, k]
+        
+        h_proj  = torch.bmm(M, h_e.unsqueeze(-1)).squeeze(-1)       # [B, k]
+        pt_proj = torch.bmm(M, pt_e.unsqueeze(-1)).squeeze(-1)      # [B, k]
+        nt_proj = torch.bmm(M, nt_e.unsqueeze(-1)).squeeze(-1)      # [B, k]
+        
+        # TransR距離 (次元正規化あり)
+        pos_dist = torch.sum((h_proj + e_r - pt_proj) ** 2, dim=-1) / k  # [B]
+        neg_dist = torch.sum((h_proj + e_r - nt_proj) ** 2, dim=-1) / k  # [B]
+        
+        # Pairwise Ranking Loss: 正例距離 < 負例距離 となるよう最適化
+        kge_loss = torch.mean(F.softplus(pos_dist - neg_dist))
+        
+        # L2 Regularization (KGEタスク用、重み係数は外部で適用)
+        l2_loss = _L2_loss_mean(h_e) + _L2_loss_mean(pt_e) + _L2_loss_mean(nt_e)
+        
+        return kge_loss, l2_loss

@@ -141,7 +141,22 @@ def train(args):
             cf_batch_pos_item = cf_batch_pos_item.to(device)
             cf_batch_neg_item = cf_batch_neg_item.to(device)
 
-            batch_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+            # ★ KG batch sampling for KGE multi-task loss
+            kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t = data.generate_kg_batch(
+                data.train_kg_dict, args.kg_batch_size, data.n_entities)
+            kg_batch_h = kg_batch_h.to(device)
+            kg_batch_r = kg_batch_r.to(device)
+            kg_batch_pos_t = kg_batch_pos_t.to(device)
+            kg_batch_neg_t = kg_batch_neg_t.to(device)
+
+            # CF Loss (BPR + L2)
+            cf_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+
+            # ★ KGE Pairwise Ranking Loss
+            kge_loss, kge_l2 = model('calc_kge_loss', kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t)
+
+            # Total Loss = CF + λ_KGE * KGE + λ_KGE_L2 * KGE_L2
+            batch_loss = cf_loss + args.kge_lambda * kge_loss + args.kge_l2loss_lambda * kge_l2
 
             if np.isnan(batch_loss.cpu().detach().numpy()):
                 logging.info('ERROR (CF Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_batch))
@@ -153,9 +168,11 @@ def train(args):
             total_loss += batch_loss.item()
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val))
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Total {:.4f} | CF {:.4f} | KGE {:.4f} | Lambda {:.4f}'.format(
+                    epoch, iter, n_batch, time() - time_iter, batch_loss.item(), cf_loss.item(), kge_loss.item(), lam_val))
         
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Mean Loss {:.4f} | Lambda {:.4f}'.format(
+            epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate

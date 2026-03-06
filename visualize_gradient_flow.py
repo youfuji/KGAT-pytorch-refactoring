@@ -149,15 +149,33 @@ def analyze_intermediate_gradients(model, data, device):
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
         dist.retain_grad(); intermediates[f'dist ({L})'] = dist
 
-        # 5. Combined logit (lambda is annealed, not learned)
+        # 5. ★ Z-score normalization per center node
+        ones = torch.ones_like(dist)
+        count = torch.zeros(model.n_entities, device=dist.device, dtype=dist.dtype)
+        count = count.index_add(0, model.h_list, ones).clamp(min=1)
+
+        mu = torch.zeros(model.n_entities, device=dist.device, dtype=dist.dtype)
+        mu = mu.index_add(0, model.h_list, dist) / count
+        intermediates[f'mu ({L})'] = mu
+
+        diff_sq = (dist - mu[model.h_list]) ** 2
+        var = torch.zeros(model.n_entities, device=dist.device, dtype=dist.dtype)
+        var = var.index_add(0, model.h_list, diff_sq) / count
+        sigma = var.sqrt()
+        intermediates[f'sigma ({L})'] = sigma
+
+        d_tilde = (dist - mu[model.h_list]) / (sigma[model.h_list] + 1e-8)
+        d_tilde.retain_grad(); intermediates[f'd_tilde ({L})'] = d_tilde
+
+        # 6. Combined logit (lambda is annealed, not learned)
         lam = model.lambda_val.clone()
         intermediates[f'lambda ({L})'] = lam
 
-        attention_values = sem - lam * dist
+        attention_values = sem - lam * d_tilde
         attention_values.retain_grad(); intermediates[f'pi ({L})'] = attention_values
 
-        # 6. Edge softmax
-        alpha = model._edge_softmax(attention_values)
+        # 7. Edge softmax with temperature τ
+        alpha = model._edge_softmax(attention_values, tau=model.tau)
         alpha.retain_grad(); intermediates[f'alpha ({L})'] = alpha
 
         return alpha
@@ -416,6 +434,10 @@ def main():
     parser.add_argument('--lambda_warmup_epochs', type=int, default=100)
     parser.add_argument('--lambda_anneal_epochs', type=int, default=400)
     parser.add_argument('--Ks', nargs='?', default='[20]')
+    parser.add_argument('--tau', type=float, default=1.0)
+    parser.add_argument('--kge_lambda', type=float, default=0.1)
+    parser.add_argument('--kge_l2loss_lambda', type=float, default=1e-5)
+    parser.add_argument('--kg_batch_size', type=int, default=4096)
 
     # 勾配可視化専用の引数
     parser.add_argument('--n_warmup_epochs', type=int, default=0,
@@ -506,7 +528,18 @@ def main():
                 cf_batch_pos_item = cf_batch_pos_item.to(device)
                 cf_batch_neg_item = cf_batch_neg_item.to(device)
 
-                batch_loss = model.calc_loss(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+                # ★ KG batch for multi-task loss
+                kg_h, kg_r, kg_pos_t, kg_neg_t = data.generate_kg_batch(
+                    data.train_kg_dict, args.kg_batch_size, data.n_entities)
+                kg_h = kg_h.to(device)
+                kg_r = kg_r.to(device)
+                kg_pos_t = kg_pos_t.to(device)
+                kg_neg_t = kg_neg_t.to(device)
+
+                cf_loss = model.calc_loss(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+                kge_loss, kge_l2 = model.calc_kge_loss(kg_h, kg_r, kg_pos_t, kg_neg_t)
+                batch_loss = cf_loss + args.kge_lambda * kge_loss + args.kge_l2loss_lambda * kge_l2
+
                 batch_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -524,7 +557,7 @@ def main():
     print(f"# lambda_val={model.lambda_val.item():.6f}")
     print(f"{'#'*80}")
 
-    # 分析1: パラメータ別勾配ノルム
+    # 分析1: パラメータ別勾配ノルム (CF + KGE multi-task loss)
     model.train()
     model.zero_grad()
 
@@ -535,8 +568,19 @@ def main():
     cf_batch_pos_item = cf_batch_pos_item.to(device)
     cf_batch_neg_item = cf_batch_neg_item.to(device)
 
-    loss = model.calc_loss(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+    # ★ KG batch for multi-task analysis
+    kg_h, kg_r, kg_pos_t, kg_neg_t = data.generate_kg_batch(
+        data.train_kg_dict, min(args.kg_batch_size, 1024), data.n_entities)
+    kg_h = kg_h.to(device)
+    kg_r = kg_r.to(device)
+    kg_pos_t = kg_pos_t.to(device)
+    kg_neg_t = kg_neg_t.to(device)
+
+    cf_loss = model.calc_loss(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+    kge_loss, kge_l2 = model.calc_kge_loss(kg_h, kg_r, kg_pos_t, kg_neg_t)
+    loss = cf_loss + args.kge_lambda * kge_loss + args.kge_l2loss_lambda * kge_l2
     loss.backward()
+    print(f"\n  CF Loss: {cf_loss.item():.6f} | KGE Loss: {kge_loss.item():.6f} | Total: {loss.item():.6f}")
     analyze_param_gradients(model, loss.item())
 
     # 分析2: 中間テンソルの勾配
