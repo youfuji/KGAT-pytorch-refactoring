@@ -203,9 +203,9 @@ class T_AKDN(nn.Module):
         diff_sq = (dist - mu[self.h_list]) ** 2                     # [E]
         var = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
         var = var.index_add(0, self.h_list, diff_sq) / count        # [N] 近傍分散
-        sigma = var.sqrt()                                          # [N] 近傍標準偏差
+        sigma = (var + 1e-8).sqrt()                                 # [N] 近傍標準偏差
         
-        d_tilde = (dist - mu[self.h_list]) / (sigma[self.h_list] + 1e-8)  # [E] 標準化距離
+        d_tilde = (dist - mu[self.h_list]) / sigma[self.h_list]     # [E] 標準化距離
         
         # 6. Combined logit: pi = sem - λ * d_tilde  (λ is annealed)
         attention_values = sem - self.lambda_val * d_tilde           # [E]
