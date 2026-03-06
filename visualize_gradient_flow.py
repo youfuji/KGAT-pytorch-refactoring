@@ -429,15 +429,16 @@ def main():
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5)
     parser.add_argument('--transr_dim', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.0001)
-    parser.add_argument('--lambda_init', type=float, default=0.0)
-    parser.add_argument('--lambda_final', type=float, default=0.5)
-    parser.add_argument('--lambda_warmup_epochs', type=int, default=100)
-    parser.add_argument('--lambda_anneal_epochs', type=int, default=400)
+    parser.add_argument('--lambda_att', type=float, default=0.5)
     parser.add_argument('--Ks', nargs='?', default='[20]')
     parser.add_argument('--tau', type=float, default=1.0)
     parser.add_argument('--kge_lambda', type=float, default=0.1)
     parser.add_argument('--kge_l2loss_lambda', type=float, default=1e-5)
     parser.add_argument('--kg_batch_size', type=int, default=4096)
+
+    # Attention Diagnostics の引数 (parser_t_akdn.pyと合わせる)
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.05)
+    parser.add_argument('--attn_diag_top_k', type=int, default=5)
 
     # 勾配可視化専用の引数
     parser.add_argument('--n_warmup_epochs', type=int, default=0,
@@ -509,14 +510,8 @@ def main():
         
         for epoch in range(1, args.n_warmup_epochs + 1):
             model.train()
-            # 3-phase Lambda annealing
-            if epoch <= args.lambda_warmup_epochs:
-                lam_val = args.lambda_init
-            elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
-                progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
-                lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
-            else:
-                lam_val = args.lambda_final
+            # Fixed lambda attention penalty
+            lam_val = args.lambda_att
             model.set_lambda(lam_val)
 
             total_loss = 0
@@ -592,6 +587,16 @@ def main():
     # 分析4: 計算グラフ (オプション)
     if not args.skip_torchviz:
         visualize_computation_graph(model, data, device, save_path=args.graph_save_path)
+
+    # 分析5: アテンション診断 (New)
+    print("\n" + "=" * 80)
+    print("【5】アテンション診断 (Attention Diagnostics)")
+    print("=" * 80)
+    model.eval()
+    attn_diag = model.compute_attention_diagnostics(
+        threshold=args.attn_diag_threshold, top_k=args.attn_diag_top_k)
+    print(f"  Effective Neighbors (threshold > {args.attn_diag_threshold}): {attn_diag['effective_neighbors']:.2f}")
+    print(f"  Top-{args.attn_diag_top_k} Ratio: {attn_diag['topk_ratio']:.4f}")
 
     print(f"\n{'='*80}")
     print("分析完了!")
