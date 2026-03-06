@@ -65,6 +65,12 @@ def parse_t_akdn_args():
     parser.add_argument('--kg_batch_size', type=int, default=4096,
                         help='KG batch size for KGE loss computation.')
 
+    # --- Attention Diagnostics ---
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.05,
+                        help='Threshold for effective neighborhood size (alpha > threshold).')
+    parser.add_argument('--attn_diag_top_k', type=int, default=5,
+                        help='Top-K neighbors for attention ratio diagnostic.')
+
     parser.add_argument('--n_epoch', type=int, default=500,
                         help='Number of epoch.')
     parser.add_argument('--stopping_steps', type=int, default=10,

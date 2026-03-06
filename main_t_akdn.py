@@ -132,6 +132,8 @@ def train(args):
 
         time_cf = time()
         total_loss = 0
+        total_cf_loss = 0
+        total_kge_loss = 0
         n_batch = data.n_cf_train // data.cf_batch_size + 1
 
         for iter in range(1, n_batch + 1):
@@ -166,6 +168,8 @@ def train(args):
             optimizer.step()
             optimizer.zero_grad()
             total_loss += batch_loss.item()
+            total_cf_loss += cf_loss.item()
+            total_kge_loss += kge_loss.item()
 
             if (iter % args.cf_print_every) == 0:
                 logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Total {:.4f} | CF {:.4f} | KGE {:.4f} | Lambda {:.4f}'.format(
@@ -173,6 +177,8 @@ def train(args):
         
         logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Mean Loss {:.4f} | Lambda {:.4f}'.format(
             epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
+        logging.info('--- Group 1 (Loss) ---  BPR: {:.4f} | KGE: {:.4f}'.format(
+            total_cf_loss / n_batch, total_kge_loss / n_batch))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate
@@ -181,6 +187,12 @@ def train(args):
             _, metrics_dict = evaluate(model, data, Ks, device)
             logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
                 epoch, time() - time_eval, metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+
+            # --- Group 2: Attention Diagnostics ---
+            attn_diag = model.compute_attention_diagnostics(
+                threshold=args.attn_diag_threshold, top_k=args.attn_diag_top_k)
+            logging.info('--- Group 2 (Attention) ---  EffNeighbors: {:.2f} | Top{:d} Ratio: {:.4f}'.format(
+                attn_diag['effective_neighbors'], args.attn_diag_top_k, attn_diag['topk_ratio']))
 
             epoch_list.append(epoch)
             for k in Ks:
