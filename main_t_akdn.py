@@ -159,9 +159,9 @@ def train(args):
                 logging.info('ERROR (CF Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_batch))
                 sys.exit()
 
+            optimizer.zero_grad()
             batch_loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
             total_loss += batch_loss.item()
             total_cf_loss += cf_loss.item()
             total_kge_loss += kge_loss.item()
