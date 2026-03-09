@@ -394,3 +394,64 @@ class AKDN(nn.Module):
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
         return cf_loss + self.cf_l2loss_lambda * l2_loss
+
+    @torch.no_grad()
+    def compute_attention_diagnostics(self, threshold=0.05, top_k=5, max_sample_nodes=1000):
+        """
+        アテンション形状の診断指標を計算（推論モード、勾配不要）。
+
+        第1層の alpha を取得し、中心ノードごとに以下を算出:
+          - effective_neighbors: 閾値超えの有効近傍数の平均
+          - topk_ratio: 上位K個の重み占有率の平均
+
+        Args:
+            threshold: 有効近傍とみなす alpha の閾値 (default: 0.05)
+            top_k: Top-K Ratio を計算する上位個数 (default: 5)
+            max_sample_nodes: Top-K Ratio 計算時のランダムサンプリング上限 (default: 1000)
+        Returns:
+            dict: {'effective_neighbors': float, 'topk_ratio': float}
+        """
+        # 第1層のEntity Embeddingでalphaを計算
+        e_entities = self.entity_user_embed.weight[:self.n_entities]
+        alpha = self._compute_kg_attention(e_entities)  # [E]
+
+        # --- 平均有効近傍数（全ノード対象、scatter演算で高速） ---
+        effective_mask = (alpha > threshold).float()  # [E]
+        eff_per_node = torch.zeros(self.n_entities, device=alpha.device)
+        eff_per_node.index_add_(0, self.h_list, effective_mask)
+
+        # 近傍を持つノードのみで平均をとる
+        has_neighbors = torch.zeros(self.n_entities, device=alpha.device)
+        has_neighbors.index_add_(0, self.h_list, torch.ones_like(alpha))
+        active_mask = has_neighbors > 0
+        if active_mask.sum() > 0:
+            avg_effective_neighbors = eff_per_node[active_mask].mean().item()
+        else:
+            avg_effective_neighbors = 0.0
+
+        # --- Top-K Attention Ratio（ランダムサンプリング） ---
+        unique_heads = self.h_list.unique()
+        n_unique = unique_heads.size(0)
+
+        # サンプリング: ノード数が多い場合はランダムに絞る
+        if n_unique > max_sample_nodes:
+            perm = torch.randperm(n_unique, device=unique_heads.device)[:max_sample_nodes]
+            sampled_heads = unique_heads[perm]
+        else:
+            sampled_heads = unique_heads
+
+        topk_ratios = []
+        for head in sampled_heads:
+            edge_mask = (self.h_list == head)
+            head_alpha = alpha[edge_mask]
+            k_actual = min(top_k, head_alpha.size(0))
+            topk_vals, _ = head_alpha.topk(k_actual)
+            topk_ratios.append(topk_vals.sum().item())
+
+        avg_topk_ratio = sum(topk_ratios) / len(topk_ratios) if topk_ratios else 0.0
+
+        return {
+            'effective_neighbors': avg_effective_neighbors,
+            'topk_ratio': avg_topk_ratio,
+        }
+
