@@ -134,7 +134,8 @@ def run_ablation():
     else:
         user_pre_embed, item_pre_embed = None, None
 
-    model = AKDN(args, data.n_users, data.n_entities, data.n_relations, 
+    model = AKDN(args, data.n_users, data.n_entities, data.n_relations,
+                 n_items=data.n_items,
                  A_in=data.norm_adj_mat, 
                  user_pre_embed=user_pre_embed, 
                  item_pre_embed=item_pre_embed,

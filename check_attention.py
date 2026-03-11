@@ -96,6 +96,7 @@ def build_model(args, data, device):
     if args.model_type == 'akdn':
         from model.AKDN import AKDN
         model = AKDN(args, data.n_users, data.n_entities, data.n_relations,
+                     n_items=data.n_items,
                      A_in=data.norm_adj_mat,
                      user_pre_embed=user_pre_embed,
                      item_pre_embed=item_pre_embed,
@@ -103,6 +104,7 @@ def build_model(args, data, device):
     else:
         from model.T_AKDN import T_AKDN
         model = T_AKDN(args, data.n_users, data.n_entities, data.n_relations,
+                       n_items=data.n_items,
                        A_in=data.norm_adj_mat,
                        user_pre_embed=user_pre_embed,
                        item_pre_embed=item_pre_embed,

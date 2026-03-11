@@ -6,13 +6,14 @@ def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
 class AKDN(nn.Module):
-    def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
+    def __init__(self, args, n_users, n_entities, n_relations, n_items=None, A_in=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
 
         self.n_users = n_users
         self.n_entities = n_entities
+        self.n_items = n_items if n_items is not None else n_entities  # アイテムID空間 (0 ~ n_items-1)
         self.n_relations = n_relations
 
         self.embed_dim = args.embed_dim
@@ -396,7 +397,7 @@ class AKDN(nn.Module):
         return cf_loss + self.cf_l2loss_lambda * l2_loss
 
     @torch.no_grad()
-    def compute_attention_diagnostics(self, threshold=0.05, top_k=5, max_sample_nodes=1000):
+    def compute_attention_diagnostics(self, threshold=0.35, top_k=2, max_sample_nodes=1000):
         """
         アテンション形状の診断指標を計算（推論モード、勾配不要）。
 
@@ -405,8 +406,8 @@ class AKDN(nn.Module):
           - topk_ratio: 上位K個の重み占有率の平均
 
         Args:
-            threshold: 有効近傍とみなす alpha の閾値 (default: 0.05)
-            top_k: Top-K Ratio を計算する上位個数 (default: 5)
+            threshold: 有効近傍とみなす alpha の閾値 (default: 0.35)
+            top_k: Top-K Ratio を計算する上位個数 (default: 2)
             max_sample_nodes: Top-K Ratio 計算時のランダムサンプリング上限 (default: 1000)
         Returns:
             dict: {'effective_neighbors': float, 'topk_ratio': float}
@@ -415,30 +416,34 @@ class AKDN(nn.Module):
         e_entities = self.entity_user_embed.weight[:self.n_entities]
         alpha = self._compute_kg_attention(e_entities)  # [E]
 
-        # --- 平均有効近傍数（全ノード対象、scatter演算で高速） ---
+        # --- 平均有効近傍数（アイテムノードのみ対象） ---
         effective_mask = (alpha > threshold).float()  # [E]
         eff_per_node = torch.zeros(self.n_entities, device=alpha.device)
         eff_per_node.index_add_(0, self.h_list, effective_mask)
 
-        # 近傍を持つノードのみで平均をとる
+        # アイテムノードの範囲 (0 ~ n_items-1) に絞って平均をとる
         has_neighbors = torch.zeros(self.n_entities, device=alpha.device)
         has_neighbors.index_add_(0, self.h_list, torch.ones_like(alpha))
-        active_mask = has_neighbors > 0
+        item_eff = eff_per_node[:self.n_items]
+        item_has = has_neighbors[:self.n_items]
+        active_mask = item_has > 0
         if active_mask.sum() > 0:
-            avg_effective_neighbors = eff_per_node[active_mask].mean().item()
+            avg_effective_neighbors = item_eff[active_mask].mean().item()
         else:
             avg_effective_neighbors = 0.0
 
-        # --- Top-K Attention Ratio（ランダムサンプリング） ---
+        # --- Top-K Attention Ratio（アイテムノードのみからサンプリング） ---
         unique_heads = self.h_list.unique()
-        n_unique = unique_heads.size(0)
+        # アイテムID (0 ~ n_items-1) のみに絞る
+        item_heads = unique_heads[unique_heads < self.n_items]
+        n_unique = item_heads.size(0)
 
-        # サンプリング: ノード数が多い場合はランダムに絞る
+        # サンプリング: アイテムノード数が多い場合はランダムに絞る
         if n_unique > max_sample_nodes:
-            perm = torch.randperm(n_unique, device=unique_heads.device)[:max_sample_nodes]
-            sampled_heads = unique_heads[perm]
+            perm = torch.randperm(n_unique, device=item_heads.device)[:max_sample_nodes]
+            sampled_heads = item_heads[perm]
         else:
-            sampled_heads = unique_heads
+            sampled_heads = item_heads
 
         topk_ratios = []
         for head in sampled_heads:
