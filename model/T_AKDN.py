@@ -509,3 +509,41 @@ class T_AKDN(nn.Module):
             'effective_neighbors': avg_effective_neighbors,
             'topk_ratio': avg_topk_ratio,
         }
+
+    @torch.no_grad()
+    def export_item_attention_csv(self, output_path, max_items=None):
+        """
+        アイテムノードを中心とするエッジのアテンションスコアをCSVに出力。
+
+        出力フォーマット（1行1エッジ）:
+          item_id, neighbor_id, relation_id, attention_score
+
+        Args:
+            output_path: 出力CSVのパス
+            max_items:   出力するアイテムIDの上限 (None=n_items)
+        """
+        import csv
+
+        e_entities = self.entity_user_embed.weight[:self.n_entities]
+        alpha = self._compute_kg_attention(e_entities)  # [E]
+
+        h_cpu = self.h_list.cpu()
+        t_cpu = self.t_list.cpu()
+        r_cpu = self.r_list.cpu()
+        a_cpu = alpha.cpu()
+
+        # アイテムノード (0 ~ n_items-1) のエッジのみ抽出
+        limit = max_items if max_items is not None else self.n_items
+        item_mask = h_cpu < limit
+
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['item_id', 'neighbor_id', 'relation_id', 'attention_score'])
+            for h, t, r, a in zip(h_cpu[item_mask].tolist(),
+                                   t_cpu[item_mask].tolist(),
+                                   r_cpu[item_mask].tolist(),
+                                   a_cpu[item_mask].tolist()):
+                writer.writerow([h, t, r, f'{a:.6f}'])
+
+        n_rows = int(item_mask.sum().item())
+        return n_rows

@@ -76,6 +76,8 @@ def parse_args():
                         help='Threshold for effective neighborhood size.')
     parser.add_argument('--attn_diag_top_k', type=int, default=5,
                         help='Top-K neighbors for attention ratio.')
+    parser.add_argument('--attn_export_csv', type=str, default='',
+                        help='If set, export per-item attention scores to this CSV file path.')
 
     args = parser.parse_args()
 
@@ -230,6 +232,11 @@ def main():
     logging.info(f"  Top{args.attn_diag_top_k} Ratio: {attn_diag['topk_ratio']:.4f}")
     logging.info(f"  Evaluation time: {eval_time:.1f}s")
     logging.info("=" * 60)
+
+    if args.attn_export_csv:
+        logging.info(f"Exporting per-item attention scores to {args.attn_export_csv} ...")
+        n_edges = model.export_item_attention_csv(args.attn_export_csv)
+        logging.info(f"Done. Exported {n_edges} item-centric edges.")
 
 
 if __name__ == '__main__':
