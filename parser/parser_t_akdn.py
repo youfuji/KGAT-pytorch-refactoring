@@ -43,17 +43,28 @@ def parse_t_akdn_args():
     # --- T-AKDN specific hyperparameters ---
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
+    parser.add_argument('--tau', type=float, default=1.0,
+                        help='Temperature parameter for attention softmax sharpness control.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
-    parser.add_argument('--lambda_init', type=float, default=0.0,
-                        help='Phase 1 lambda value (warmup, sem only).')
-    parser.add_argument('--lambda_final', type=float, default=0.5,
-                        help='Phase 2-3 lambda target value (saturation).')
-    parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
-                        help='Phase 1: epochs with lambda=init (no dist penalty).')
-    parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
-                        help='Phase 2: epochs to linearly anneal lambda from init to final.')
+    parser.add_argument('--lambda_att', type=float, default=0.5,
+                        help='Lambda value for TransR distance penalty in attention (fixed, no annealing).')
+
+    # --- KGE multi-task learning ---
+    parser.add_argument('--kge_lambda', type=float, default=0.1,
+                        help='Weight for KGE pairwise ranking loss (lambda_KGE).')
+    parser.add_argument('--kge_l2loss_lambda', type=float, default=1e-5,
+                        help='L2 regularization coefficient for KGE task (independent from CF).')
+    parser.add_argument('--kg_batch_size', type=int, default=4096,
+                        help='KG batch size for KGE loss computation.')
+
+    # --- Attention Diagnostics ---
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.05,
+                        help='Threshold for effective neighborhood size (alpha > threshold).')
+    parser.add_argument('--attn_diag_top_k', type=int, default=5,
+                        help='Top-K neighbors for attention ratio diagnostic.')
+
     parser.add_argument('--n_epoch', type=int, default=500,
                         help='Number of epoch.')
     parser.add_argument('--stopping_steps', type=int, default=10,
@@ -70,7 +81,7 @@ def parse_t_akdn_args():
     args = parser.parse_args()
 
     # T-AKDN用の保存ディレクトリ設定
-    save_dir = 'trained_model/T_AKDN/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
+    save_dir = 'trained_model/T_AKDN_KGELOSS/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
         args.data_name, args.embed_dim, args.relation_dim, args.transr_dim,
         args.lr, args.use_pretrain)
     args.save_dir = save_dir

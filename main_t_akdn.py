@@ -34,7 +34,7 @@ def evaluate(model, dataloader, Ks, device):
     item_ids = torch.arange(n_items, dtype=torch.long).to(device)
 
     cf_scores = []
-    metric_names = ['precision', 'recall', 'ndcg']
+    metric_names = ['recall', 'ndcg']
     metrics_dict = {k: {m: [] for m in metric_names} for k in Ks}
 
     with tqdm(total=len(user_ids_batches), desc='Evaluating Iteration') as pbar:
@@ -85,7 +85,8 @@ def train(args):
         user_pre_embed, item_pre_embed = None, None
 
     # construct model & optimizer
-    model = T_AKDN(args, data.n_users, data.n_entities, data.n_relations, 
+    model = T_AKDN(args, data.n_users, data.n_entities, data.n_relations,
+                   n_items=data.n_items,
                    A_in=data.norm_adj_mat, 
                    user_pre_embed=user_pre_embed, 
                    item_pre_embed=item_pre_embed,
@@ -112,26 +113,23 @@ def train(args):
     k_max = max(Ks)
 
     epoch_list = []
-    metrics_list = {k: {'precision': [], 'recall': [], 'ndcg': []} for k in Ks}
+    loss_metrics_list = {'cf_loss': [], 'kge_loss': []}
+    attn_metrics_list = {'eff_neighbors': [], 'topk_ratio': []}
+    metrics_list = {k: {'recall': [], 'ndcg': []} for k in Ks}
 
     # train model
     for epoch in range(1, args.n_epoch + 1):
         time0 = time()
         model.train()
 
-        # 3-phase Lambda annealing
-        # Phase 1: warmup (λ=init) → Phase 2: linear anneal → Phase 3: saturation (λ=final)
-        if epoch <= args.lambda_warmup_epochs:
-            lam_val = args.lambda_init
-        elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
-            progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
-            lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
-        else:
-            lam_val = args.lambda_final
+        # Fixed lambda attention penalty
+        lam_val = args.lambda_att
         model.set_lambda(lam_val)
 
         time_cf = time()
         total_loss = 0
+        total_cf_loss = 0
+        total_kge_loss = 0
         n_batch = data.n_cf_train // data.cf_batch_size + 1
 
         for iter in range(1, n_batch + 1):
@@ -141,7 +139,22 @@ def train(args):
             cf_batch_pos_item = cf_batch_pos_item.to(device)
             cf_batch_neg_item = cf_batch_neg_item.to(device)
 
-            batch_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+            # ★ KG batch sampling for KGE multi-task loss
+            kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t = data.generate_kg_batch(
+                data.train_kg_dict, args.kg_batch_size, data.n_entities)
+            kg_batch_h = kg_batch_h.to(device)
+            kg_batch_r = kg_batch_r.to(device)
+            kg_batch_pos_t = kg_batch_pos_t.to(device)
+            kg_batch_neg_t = kg_batch_neg_t.to(device)
+
+            # CF Loss (BPR + L2)
+            cf_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+
+            # ★ KGE Pairwise Ranking Loss
+            kge_loss, kge_l2 = model('calc_kge_loss', kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t)
+
+            # Total Loss = CF + λ_KGE * KGE + λ_KGE_L2 * KGE_L2
+            batch_loss = cf_loss + args.kge_lambda * kge_loss + args.kge_l2loss_lambda * kge_l2
 
             if np.isnan(batch_loss.cpu().detach().numpy()):
                 logging.info('ERROR (CF Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_batch))
@@ -151,23 +164,40 @@ def train(args):
             optimizer.step()
             optimizer.zero_grad()
             total_loss += batch_loss.item()
+            total_cf_loss += cf_loss.item()
+            total_kge_loss += kge_loss.item()
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val))
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Total {:.4f} | CF {:.4f} | KGE {:.4f}'.format(
+                    epoch, iter, n_batch, time() - time_iter, batch_loss.item(), cf_loss.item(), kge_loss.item()))
         
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Mean Loss {:.4f}'.format(
+            epoch, n_batch, time() - time_cf, total_loss / n_batch))
+        logging.info('--- Group 1 (Loss) ---  BPR: {:.4f} | KGE: {:.4f}'.format(
+            total_cf_loss / n_batch, total_kge_loss / n_batch))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate
         if (epoch % args.evaluate_every) == 0 or epoch == args.n_epoch:
             time_eval = time()
             _, metrics_dict = evaluate(model, data, Ks, device)
-            logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-                epoch, time() - time_eval, metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+            logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
+                epoch, time() - time_eval, metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+
+            # --- Group 2: Attention Diagnostics ---
+            attn_diag = model.compute_attention_diagnostics(
+                threshold=args.attn_diag_threshold, top_k=args.attn_diag_top_k)
+            logging.info('--- Group 2 (Attention) ---  EffNeighbors: {:.2f} | Top{:d} Ratio: {:.4f}'.format(
+                attn_diag['effective_neighbors'], args.attn_diag_top_k, attn_diag['topk_ratio']))
 
             epoch_list.append(epoch)
+            loss_metrics_list['cf_loss'].append(total_cf_loss / n_batch)
+            loss_metrics_list['kge_loss'].append(total_kge_loss / n_batch)
+            attn_metrics_list['eff_neighbors'].append(attn_diag['effective_neighbors'])
+            attn_metrics_list['topk_ratio'].append(attn_diag['topk_ratio'])
+            
             for k in Ks:
-                for m in ['precision', 'recall', 'ndcg']:
+                for m in ['recall', 'ndcg']:
                     metrics_list[k][m].append(metrics_dict[k][m])
             best_recall, should_stop = early_stopping(metrics_list[k_min]['recall'], args.stopping_steps)
 
@@ -180,10 +210,16 @@ def train(args):
                 best_epoch = epoch
 
     # save metrics
-    metrics_df = [epoch_list]
-    metrics_cols = ['epoch_idx']
+    metrics_df = [
+        epoch_list,
+        loss_metrics_list['cf_loss'],
+        loss_metrics_list['kge_loss'],
+        attn_metrics_list['eff_neighbors'],
+        attn_metrics_list['topk_ratio']
+    ]
+    metrics_cols = ['epoch_idx', 'cf_loss', 'kge_loss', 'eff_neighbors', 'topk_ratio']
     for k in Ks:
-        for m in ['precision', 'recall', 'ndcg']:
+        for m in ['recall', 'ndcg']:
             metrics_df.append(metrics_list[k][m])
             metrics_cols.append('{}@{}'.format(m, k))
     metrics_df = pd.DataFrame(metrics_df).transpose()
@@ -192,8 +228,8 @@ def train(args):
 
     # print best metrics
     best_metrics = metrics_df.loc[metrics_df['epoch_idx'] == best_epoch].iloc[0].to_dict()
-    logging.info('Best CF Evaluation: Epoch {:04d} | Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-        int(best_metrics['epoch_idx']), best_metrics['precision@{}'.format(k_min)], best_metrics['precision@{}'.format(k_max)], best_metrics['recall@{}'.format(k_min)], best_metrics['recall@{}'.format(k_max)], best_metrics['ndcg@{}'.format(k_min)], best_metrics['ndcg@{}'.format(k_max)]))
+    logging.info('Best CF Evaluation: Epoch {:04d} | Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
+        int(best_metrics['epoch_idx']), best_metrics['recall@{}'.format(k_min)], best_metrics['recall@{}'.format(k_max)], best_metrics['ndcg@{}'.format(k_min)], best_metrics['ndcg@{}'.format(k_max)]))
 
 
 def predict(args):
@@ -204,7 +240,8 @@ def predict(args):
     data = DataLoaderAKDN(args, logging)
 
     # load model
-    model = T_AKDN(args, data.n_users, data.n_entities, data.n_relations, A_in=data.norm_adj_mat)
+    model = T_AKDN(args, data.n_users, data.n_entities, data.n_relations,
+                   n_items=data.n_items, A_in=data.norm_adj_mat)
     model = load_model(model, args.pretrain_model_path)
     model.to(device)
 
@@ -215,8 +252,8 @@ def predict(args):
 
     cf_scores, metrics_dict = evaluate(model, data, Ks, device)
     np.save(args.save_dir + 'cf_scores.npy', cf_scores)
-    print('CF Evaluation: Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-        metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+    print('CF Evaluation: Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
+        metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
 
 
 if __name__ == '__main__':
