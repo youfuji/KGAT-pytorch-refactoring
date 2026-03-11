@@ -68,6 +68,8 @@ def parse_args():
     parser.add_argument('--Ks', type=str, default='[20]',
                         help='K values for Recall@K, NDCG@K (e.g. "[20, 40]")')
     parser.add_argument('--test_batch_size', type=int, default=10000)
+    parser.add_argument('--cf_batch_size', type=int, default=4096,
+                        help='CF batch size (required by DataLoaderAKDN init, not used during eval).')
 
     # --- Attention Diagnostics ---
     parser.add_argument('--attn_diag_threshold', type=float, default=0.05,
