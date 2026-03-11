@@ -43,6 +43,8 @@ def parse_t_akdn_args():
     # --- T-AKDN specific hyperparameters ---
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
+    parser.add_argument('--tau', type=float, default=1.0,
+                        help='Temperature parameter for attention softmax sharpness control.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
@@ -54,6 +56,13 @@ def parse_t_akdn_args():
                         help='Phase 1: epochs with lambda=init (no dist penalty).')
     parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
                         help='Phase 2: epochs to linearly anneal lambda from init to final.')
+
+    # --- Attention Diagnostics ---
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.05,
+                        help='Threshold for effective neighborhood size (alpha > threshold).')
+    parser.add_argument('--attn_diag_top_k', type=int, default=5,
+                        help='Top-K neighbors for attention ratio diagnostic.')
+
     parser.add_argument('--n_epoch', type=int, default=500,
                         help='Number of epoch.')
     parser.add_argument('--stopping_steps', type=int, default=10,
