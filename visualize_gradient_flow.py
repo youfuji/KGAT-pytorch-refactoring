@@ -149,29 +149,11 @@ def analyze_intermediate_gradients(model, data, device):
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
         dist.retain_grad(); intermediates[f'dist ({L})'] = dist
 
-        # 5. ★ Z-score normalization per center node
-        ones = torch.ones_like(dist)
-        count = torch.zeros(model.n_entities, device=dist.device, dtype=dist.dtype)
-        count = count.index_add(0, model.h_list, ones).clamp(min=1)
-
-        mu = torch.zeros(model.n_entities, device=dist.device, dtype=dist.dtype)
-        mu = mu.index_add(0, model.h_list, dist) / count
-        intermediates[f'mu ({L})'] = mu
-
-        diff_sq = (dist - mu[model.h_list]) ** 2
-        var = torch.zeros(model.n_entities, device=dist.device, dtype=dist.dtype)
-        var = var.index_add(0, model.h_list, diff_sq) / count
-        sigma = var.sqrt()
-        intermediates[f'sigma ({L})'] = sigma
-
-        d_tilde = (dist - mu[model.h_list]) / (sigma[model.h_list] + 1e-8)
-        d_tilde.retain_grad(); intermediates[f'd_tilde ({L})'] = d_tilde
-
-        # 6. Combined logit (lambda is annealed, not learned)
+        # 5. Combined logit (lambda is annealed, not learned)
         lam = model.lambda_val.clone()
         intermediates[f'lambda ({L})'] = lam
 
-        attention_values = sem - lam * d_tilde
+        attention_values = sem - lam * dist
         attention_values.retain_grad(); intermediates[f'pi ({L})'] = attention_values
 
         # 7. Edge softmax with temperature τ
