@@ -38,6 +38,12 @@ def analyze_kg_structure(data):
 
     item_degrees = np.array(item_degrees)
     attribute_degrees = np.array(attribute_degrees)
+    
+    # ユーザーの次数計算 (data.train_user_dict から取得)
+    user_degrees = []
+    for user_id, items in data.train_user_dict.items():
+        user_degrees.append(len(items))
+    user_degrees = np.array(user_degrees)
 
     # --- サマリー統計量の表示 ---
     def print_stats(name, degrees):
@@ -52,6 +58,7 @@ def analyze_kg_structure(data):
 
     print_stats("Items (ID < n_items)", item_degrees)
     print_stats("Attributes (ID >= n_items)", attribute_degrees)
+    print_stats("Users", user_degrees)
 
     # --- Excel出力（アイテムと属性でシートを分ける） ---
     def degree_distribution_df(degrees):
@@ -64,6 +71,7 @@ def analyze_kg_structure(data):
 
     item_df = degree_distribution_df(item_degrees)
     attr_df = degree_distribution_df(attribute_degrees)
+    user_df = degree_distribution_df(user_degrees)
 
     output_path = os.path.join(data.args.save_dir, "kg_degree_distribution.xlsx")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -71,6 +79,7 @@ def analyze_kg_structure(data):
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         item_df.to_excel(writer, sheet_name="items", index=False)
         attr_df.to_excel(writer, sheet_name="attributes", index=False)
+        user_df.to_excel(writer, sheet_name="users", index=False)
 
     print(f"\nSaved to: {output_path}")
 
