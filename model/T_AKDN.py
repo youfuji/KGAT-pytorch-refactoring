@@ -17,15 +17,15 @@ class T_AKDN(nn.Module):
       5. pi = s_sem - λ * s_dist   (λ is annealed, not learned)
     """
 
-    def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
+    def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(T_AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
 
         self.n_users = n_users
+        self.n_items = n_items
         self.n_entities = n_entities
         self.n_relations = n_relations
-        self.n_items = n_items if n_items is not None else n_entities  # アイテムID空間 (0 ~ n_items-1)
 
         self.embed_dim = args.embed_dim          # d: entity/user embedding dim
         self.relation_dim = args.relation_dim    # original relation dim (R^d, kept for compatibility)
