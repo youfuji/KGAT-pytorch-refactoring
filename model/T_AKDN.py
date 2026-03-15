@@ -206,9 +206,20 @@ class T_AKDN(nn.Module):
         sigma = (var + 1e-8).sqrt()                                 # [N] 近傍標準偏差
         
         d_tilde = (dist - mu[self.h_list]) / sigma[self.h_list]     # [E] 標準化距離
+
+        # =====================================================================
+        # ★ ここから追加：ハイブリッドZ変換（ノードの次数に応じた分岐）★
+        # =====================================================================
+        # Head(中心ノード)のIDが n_items より小さいかどうかのブールマスクを作成
+        is_item_head = self.h_list < self.n_items  # [E]次元の True/False テンソル
+
+        # torch.where を使ってエッジごとに距離の値を切り替える
+        # 条件が True(アイテム) なら元の距離 dist、False(属性) なら標準化距離 d_tilde を採用
+        d_final = torch.where(is_item_head, dist, d_tilde)          # [E]
+        # =====================================================================
         
         # 6. Combined logit: pi = sem - λ * d_tilde  (λ is annealed)
-        attention_values = sem - self.lambda_val * d_tilde           # [E]
+        attention_values = sem - self.lambda_val * d_final           # [E]
         
         # 7. Edge-level Softmax with temperature τ
         alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
