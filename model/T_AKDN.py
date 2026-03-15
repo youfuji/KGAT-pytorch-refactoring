@@ -25,6 +25,7 @@ class T_AKDN(nn.Module):
         self.n_users = n_users
         self.n_entities = n_entities
         self.n_relations = n_relations
+        self.n_items = n_items if n_items is not None else n_entities  # アイテムID空間 (0 ~ n_items-1)
 
         self.embed_dim = args.embed_dim          # d: entity/user embedding dim
         self.relation_dim = args.relation_dim    # original relation dim (R^d, kept for compatibility)
