@@ -43,6 +43,8 @@ def parse_t_akdn_args():
     # --- T-AKDN specific hyperparameters ---
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
+    parser.add_argument('--tau', type=float, default=1.0,
+                        help='Temperature parameter for attention softmax sharpness control.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
@@ -54,6 +56,7 @@ def parse_t_akdn_args():
                         help='Phase 1: epochs with lambda=init (no dist penalty).')
     parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
                         help='Phase 2: epochs to linearly anneal lambda from init to final.')
+
     parser.add_argument('--n_epoch', type=int, default=500,
                         help='Number of epoch.')
     parser.add_argument('--stopping_steps', type=int, default=10,
@@ -70,7 +73,7 @@ def parse_t_akdn_args():
     args = parser.parse_args()
 
     # T-AKDN用の保存ディレクトリ設定
-    save_dir = 'trained_model/T_AKDN/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
+    save_dir = 'trained_model/T_AKDN_Zonly/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
         args.data_name, args.embed_dim, args.relation_dim, args.transr_dim,
         args.lr, args.use_pretrain)
     args.save_dir = save_dir
