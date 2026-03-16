@@ -6,7 +6,7 @@ def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
 class AKDN(nn.Module):
-    def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
+    def __init__(self, args, n_users, n_entities, n_relations, n_items=None, A_in=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
@@ -14,6 +14,7 @@ class AKDN(nn.Module):
         self.n_users = n_users
         self.n_entities = n_entities
         self.n_relations = n_relations
+        self.n_items = n_items
 
         self.embed_dim = args.embed_dim
         self.relation_dim = args.relation_dim
@@ -422,21 +423,25 @@ class AKDN(nn.Module):
         t_arr = self.t_list.cpu().numpy()
         r_arr = self.r_list.cpu().numpy()
         
+        # Only export item->entity edges
+        item_limit = self.n_items if self.n_items is not None else self.n_entities
+        
         records = []
         for l_idx, (alpha, sem) in enumerate(zip(self.layer_alpha, self.layer_sem)):
             a_arr = alpha.numpy()
             s_arr = sem.numpy()
             
             for i in range(len(h_arr)):
-                records.append({
-                    'Head_ID': h_arr[i],
-                    'Tail_ID': t_arr[i],
-                    'Relation_ID': r_arr[i],
-                    'Layer': l_idx + 1,
-                    'Alpha': a_arr[i],
-                    'Sem': s_arr[i],
-                    'Dist': None  # AKDN does not have a distance logic component
-                })
+                if h_arr[i] < item_limit:
+                    records.append({
+                        'Head_ID': h_arr[i],
+                        'Tail_ID': t_arr[i],
+                        'Relation_ID': r_arr[i],
+                        'Layer': l_idx + 1,
+                        'Alpha': a_arr[i],
+                        'Sem': s_arr[i],
+                        'Dist': None  # AKDN does not have a distance logic component
+                    })
 
         df = pd.DataFrame(records)
         df.to_csv(export_path, index=False)

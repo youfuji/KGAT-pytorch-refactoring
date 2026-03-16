@@ -17,7 +17,7 @@ class T_AKDN(nn.Module):
       5. pi = s_sem - λ * s_dist   (λ is annealed, not learned)
     """
 
-    def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
+    def __init__(self, args, n_users, n_entities, n_relations, n_items=None, A_in=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(T_AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
@@ -25,6 +25,7 @@ class T_AKDN(nn.Module):
         self.n_users = n_users
         self.n_entities = n_entities
         self.n_relations = n_relations
+        self.n_items = n_items
 
         self.embed_dim = args.embed_dim          # d: entity/user embedding dim
         self.relation_dim = args.relation_dim    # original relation dim (R^d, kept for compatibility)
@@ -411,11 +412,7 @@ class T_AKDN(nn.Module):
         r_arr = self.r_list.cpu().numpy()
         
         # Only export item->entity edges
-        item_mask = h_arr < (self.n_entities - self.n_relations) # Or logic to determine item bound.
-        # Actually in T_AKDN, n_entities includes items. The user code generally passes data.n_items.
-        # However, T_AKDN init does not save n_items by default, we just have n_entities and n_users. 
-        # But wait, looking at check_attention.py `build_model`, n_items=data.n_items is passed!
-        # Let's add n_items to init if passed, else default to None.
+        item_limit = self.n_items if self.n_items is not None else self.n_entities
         
         records = []
         for l_idx, (alpha, sem, dist) in enumerate(zip(self.layer_alpha, self.layer_sem, self.layer_dist)):
@@ -424,18 +421,16 @@ class T_AKDN(nn.Module):
             d_arr = dist.numpy()
             
             for i in range(len(h_arr)):
-                # If we want all edges, we remove the if condition. check_attention asked for "items-centric" 
-                # but "item-centric" might imply head <= n_items. However, the user request just said "sem and dist for each csv layer"
-                # Let's export all edges.
-                records.append({
-                    'Head_ID': h_arr[i],
-                    'Tail_ID': t_arr[i],
-                    'Relation_ID': r_arr[i],
-                    'Layer': l_idx + 1,
-                    'Alpha': a_arr[i],
-                    'Sem': s_arr[i],
-                    'Dist': d_arr[i]
-                })
+                if h_arr[i] < item_limit:
+                    records.append({
+                        'Head_ID': h_arr[i],
+                        'Tail_ID': t_arr[i],
+                        'Relation_ID': r_arr[i],
+                        'Layer': l_idx + 1,
+                        'Alpha': a_arr[i],
+                        'Sem': s_arr[i],
+                        'Dist': d_arr[i]
+                    })
 
         df = pd.DataFrame(records)
         df.to_csv(export_path, index=False)
