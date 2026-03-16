@@ -434,10 +434,11 @@ class AKDN(nn.Module):
         eff_per_node.index_add_(0, self.h_list, effective_mask)
 
         # アイテムノードの範囲 (0 ~ n_items-1) に絞って平均をとる
+        item_limit = self.n_items if self.n_items is not None else self.n_entities
         has_neighbors = torch.zeros(self.n_entities, device=alpha.device)
         has_neighbors.index_add_(0, self.h_list, torch.ones_like(alpha))
-        item_eff = eff_per_node[:self.n_items]
-        item_has = has_neighbors[:self.n_items]
+        item_eff = eff_per_node[:item_limit]
+        item_has = has_neighbors[:item_limit]
         active_mask = item_has > 0
         if active_mask.sum() > 0:
             avg_effective_neighbors = item_eff[active_mask].mean().item()
@@ -447,7 +448,7 @@ class AKDN(nn.Module):
         # --- Top-K Attention Ratio（アイテムノードのみからサンプリング） ---
         unique_heads = self.h_list.unique()
         # アイテムID (0 ~ n_items-1) のみに絞る
-        item_heads = unique_heads[unique_heads < self.n_items]
+        item_heads = unique_heads[unique_heads < item_limit]
         n_unique = item_heads.size(0)
 
         # サンプリング: アイテムノード数が多い場合はランダムに絞る
