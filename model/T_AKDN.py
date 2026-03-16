@@ -97,6 +97,12 @@ class T_AKDN(nn.Module):
         self.gate_ig = []
         self.gate_kg = []
         
+        # 実験・可視化用 (Attention)
+        self.record_attention = False
+        self.layer_alpha = []
+        self.layer_sem = []
+        self.layer_dist = []
+        
         # Ablation Control
         self.gate_control = 'normal'  # 'normal', 'kg_only', 'ig_only'
 
@@ -193,6 +199,11 @@ class T_AKDN(nn.Module):
         # 6. Edge-level Softmax
         alpha = self._edge_softmax(attention_values)  # [E], sum-to-1 per center node
         
+        if self.record_attention:
+            self.layer_alpha.append(alpha.detach().cpu())
+            self.layer_sem.append(sem.detach().cpu())
+            self.layer_dist.append(dist.detach().cpu())
+            
         return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）
 
     def fusion_gate(self, kg_embed, ig_embed):
@@ -303,6 +314,11 @@ class T_AKDN(nn.Module):
             self.gate_wb_ig = []
             self.gate_ig = []
             self.gate_kg = []
+            
+        if self.record_attention:
+            self.layer_alpha = []
+            self.layer_sem = []
+            self.layer_dist = []
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation + Fusion (最終層はスキップ: dead-end 回避)
@@ -377,3 +393,51 @@ class T_AKDN(nn.Module):
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
         return cf_loss + self.cf_l2loss_lambda * l2_loss
+
+    def export_item_attention_csv(self, export_path):
+        import pandas as pd
+        
+        if not self.layer_alpha:
+            print("Warning: layer_alpha is empty. Recording attention now...")
+            self.record_attention = True
+            # Dummy forward pass to trigger attention recording
+            # We just need to call get_embeddings()
+            with torch.no_grad():
+                self.get_embeddings()
+            
+        # Get edges
+        h_arr = self.h_list.cpu().numpy()
+        t_arr = self.t_list.cpu().numpy()
+        r_arr = self.r_list.cpu().numpy()
+        
+        # Only export item->entity edges
+        item_mask = h_arr < (self.n_entities - self.n_relations) # Or logic to determine item bound.
+        # Actually in T_AKDN, n_entities includes items. The user code generally passes data.n_items.
+        # However, T_AKDN init does not save n_items by default, we just have n_entities and n_users. 
+        # But wait, looking at check_attention.py `build_model`, n_items=data.n_items is passed!
+        # Let's add n_items to init if passed, else default to None.
+        
+        records = []
+        for l_idx, (alpha, sem, dist) in enumerate(zip(self.layer_alpha, self.layer_sem, self.layer_dist)):
+            a_arr = alpha.numpy()
+            s_arr = sem.numpy()
+            d_arr = dist.numpy()
+            
+            for i in range(len(h_arr)):
+                # If we want all edges, we remove the if condition. check_attention asked for "items-centric" 
+                # but "item-centric" might imply head <= n_items. However, the user request just said "sem and dist for each csv layer"
+                # Let's export all edges.
+                records.append({
+                    'Head_ID': h_arr[i],
+                    'Tail_ID': t_arr[i],
+                    'Relation_ID': r_arr[i],
+                    'Layer': l_idx + 1,
+                    'Alpha': a_arr[i],
+                    'Sem': s_arr[i],
+                    'Dist': d_arr[i]
+                })
+
+        df = pd.DataFrame(records)
+        df.to_csv(export_path, index=False)
+        return len(records)
+

@@ -66,7 +66,6 @@ class AKDN(nn.Module):
         self.leakyrelu = nn.LeakyReLU()
         self.sigmoid = nn.Sigmoid()
         
-        # 可視化用
         self.record_gate = False
         self.gate_coefficients = []
         self.gate_inputs = []
@@ -74,6 +73,11 @@ class AKDN(nn.Module):
         self.gate_wb_ig = []
         self.gate_ig = []
         self.gate_kg = []
+        
+        # 実験・可視化用 (Attention)
+        self.record_attention = False
+        self.layer_alpha = []
+        self.layer_sem = []
         
         # Ablation Control
         self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
@@ -188,6 +192,10 @@ class AKDN(nn.Module):
         # 3. Edge Softmax (per-head normalization)
         alpha = self._edge_softmax(attention_values)
         
+        if self.record_attention:
+            self.layer_alpha.append(alpha.detach().cpu())
+            self.layer_sem.append(attention_values.detach().cpu())
+            
         return alpha  # [E]
 
 
@@ -318,6 +326,10 @@ class AKDN(nn.Module):
             self.gate_wb_ig = []
             self.gate_ig = []
             self.gate_kg = []
+            
+        if self.record_attention:
+            self.layer_alpha = []
+            self.layer_sem = []
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation (最終層はスキップ: dead-end 回避)
@@ -394,3 +406,38 @@ class AKDN(nn.Module):
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
         return cf_loss + self.cf_l2loss_lambda * l2_loss
+
+    def export_item_attention_csv(self, export_path):
+        import pandas as pd
+        
+        if not self.layer_alpha:
+            print("Warning: layer_alpha is empty. Recording attention now...")
+            self.record_attention = True
+            # Dummy forward pass to trigger attention recording
+            with torch.no_grad():
+                self.get_embeddings()
+            
+        # Get edges
+        h_arr = self.h_list.cpu().numpy()
+        t_arr = self.t_list.cpu().numpy()
+        r_arr = self.r_list.cpu().numpy()
+        
+        records = []
+        for l_idx, (alpha, sem) in enumerate(zip(self.layer_alpha, self.layer_sem)):
+            a_arr = alpha.numpy()
+            s_arr = sem.numpy()
+            
+            for i in range(len(h_arr)):
+                records.append({
+                    'Head_ID': h_arr[i],
+                    'Tail_ID': t_arr[i],
+                    'Relation_ID': r_arr[i],
+                    'Layer': l_idx + 1,
+                    'Alpha': a_arr[i],
+                    'Sem': s_arr[i],
+                    'Dist': None  # AKDN does not have a distance logic component
+                })
+
+        df = pd.DataFrame(records)
+        df.to_csv(export_path, index=False)
+        return len(records)
