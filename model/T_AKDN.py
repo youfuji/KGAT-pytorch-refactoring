@@ -14,7 +14,7 @@ class T_AKDN(nn.Module):
       2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
       3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
       4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-      5. pi = s_sem - λ * s_dist   (λ is annealed, not learned)
+            5. pi = s_sem + λ * Z-score(-s_dist)   (λ is annealed, not learned)
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
@@ -159,8 +159,8 @@ class T_AKDN(nn.Module):
           2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
           3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
           4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-          5. d_tilde = Z-score(s_dist)  per center node
-          6. pi = s_sem - λ * d_tilde
+                    5. d_tilde_neg = Z-score(-s_dist)  per center node
+                    6. pi = s_sem + λ * d_tilde_neg
         
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, d)
@@ -191,25 +191,25 @@ class T_AKDN(nn.Module):
         # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
         
-        # 5. ★ Z-score normalization per center node (近傍内Z変換)
-        #    Softmax による距離ペナルティの相殺を防ぐため、
-        #    中心ノード i の近傍集合内で距離を標準化する
-        ones = torch.ones_like(dist)
+        # 5. ★ Z-score normalization of (-dist) per center node (近傍内Z変換)
+        #    中心ノード i の近傍集合内で -s_dist を標準化
+        neg_dist = -dist
+        ones = torch.ones_like(neg_dist)
         count = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
         count = count.index_add(0, self.h_list, ones).clamp(min=1)  # [N]
         
         mu = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
-        mu = mu.index_add(0, self.h_list, dist) / count             # [N] 近傍平均
+        mu = mu.index_add(0, self.h_list, neg_dist) / count         # [N] 近傍平均
         
-        diff_sq = (dist - mu[self.h_list]) ** 2                     # [E]
+        diff_sq = (neg_dist - mu[self.h_list]) ** 2                 # [E]
         var = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
         var = var.index_add(0, self.h_list, diff_sq) / count        # [N] 近傍分散
         sigma = (var + 1e-8).sqrt()                                 # [N] 近傍標準偏差
         
-        d_tilde = (dist - mu[self.h_list]) / sigma[self.h_list]     # [E] 標準化距離
+        d_tilde_neg = (neg_dist - mu[self.h_list]) / sigma[self.h_list]  # [E] 標準化距離
         
-        # 6. Combined logit: pi = sem - λ * d_tilde  (λ is annealed)
-        attention_values = sem - self.lambda_val * d_tilde           # [E]
+        # 6. Combined logit: pi = sem + λ * Z-score(-s_dist)  (λ is annealed)
+        attention_values = sem + self.lambda_val * d_tilde_neg       # [E]
         
         # 7. Edge-level Softmax with temperature τ
         alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
