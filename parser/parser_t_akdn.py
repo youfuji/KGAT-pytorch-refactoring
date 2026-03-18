@@ -58,9 +58,9 @@ def parse_t_akdn_args():
                         help='Phase 2: epochs to linearly anneal lambda from init to final.')
 
     # --- Attention Diagnostics ---
-    parser.add_argument('--attn_diag_threshold', type=float, default=0.05,
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.35,
                         help='Threshold for effective neighborhood size (alpha > threshold).')
-    parser.add_argument('--attn_diag_top_k', type=int, default=5,
+    parser.add_argument('--attn_diag_top_k', type=int, default=2,
                         help='Top-K neighbors for attention ratio diagnostic.')
 
     parser.add_argument('--n_epoch', type=int, default=500,
