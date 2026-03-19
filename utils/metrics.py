@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
 from collections import Counter
+from collections import defaultdict
 
 
 def calc_recall(rank, ground_truth, k):
@@ -182,6 +183,70 @@ def calc_auc(ground_truth, prediction):
 def logloss(ground_truth, prediction):
     logloss = log_loss(np.asarray(ground_truth), np.asarray(prediction))
     return logloss
+
+
+def compute_attention_diagnostics_from_alpha(alpha, h_list, n_items,
+                                             threshold=0.35, top_k=2):
+    """
+    Compute attention-shape diagnostics from edge-level attention weights.
+
+    Args:
+        alpha: torch.Tensor, [E] edge-level attention weights.
+        h_list: torch.Tensor, [E] head node index per edge.
+        n_items: int, number of item nodes (item ids are expected in [0, n_items)).
+        threshold: float, threshold to count effective neighbors.
+        top_k: int, K for Top-K attention ratio.
+    Returns:
+        dict: {'effective_neighbors': float, 'topk_ratio': float}
+    """
+    # 1. アイテム起点のエッジのみを抽出
+    item_edge_mask = h_list < n_items
+    item_h_list = h_list[item_edge_mask]
+    item_alpha = alpha[item_edge_mask]
+
+    # アイテムが一つも無い場合の安全策
+    if item_alpha.numel() == 0:
+        return {'effective_neighbors': 0.0, 'topk_ratio': 0.0}
+
+    # =====================================================================
+    # --- 1. average effective neighbors (超高速・完全並列) ---
+    # =====================================================================
+    effective_mask = (item_alpha > threshold).float()
+    eff_per_node = torch.zeros(n_items, device=alpha.device, dtype=alpha.dtype)
+    eff_per_node.index_add_(0, item_h_list, effective_mask)
+
+    has_neighbors = torch.zeros(n_items, device=alpha.device, dtype=alpha.dtype)
+    has_neighbors.index_add_(0, item_h_list, torch.ones_like(item_alpha))
+
+    active_mask = has_neighbors > 0
+    avg_effective_neighbors = eff_per_node[active_mask].mean().item()
+
+    # =====================================================================
+    # --- 2. top-k attention ratio (O(E)の高速集約アルゴリズム) ---
+    # =====================================================================
+    # PyTorchのループマスキングは遅いため、CPU/NumPyの辞書で一括処理する
+    h_list_np = item_h_list.detach().cpu().numpy()
+    alpha_np = item_alpha.detach().cpu().numpy()
+    
+    # ノードごとのalphaリストをO(E)で構築
+    node_to_alphas = defaultdict(list)
+    for h, a in zip(h_list_np, alpha_np):
+        node_to_alphas[h].append(a)
+
+    topk_ratios = []
+    for alphas in node_to_alphas.values():
+        # 降順ソートしてTop-Kを取得（リストの長さは平均3〜5なので超高速）
+        alphas.sort(reverse=True)
+        k_actual = min(top_k, len(alphas))
+        topk_sum = sum(alphas[:k_actual])
+        topk_ratios.append(topk_sum)
+
+    avg_topk_ratio = sum(topk_ratios) / len(topk_ratios) if topk_ratios else 0.0
+
+    return {
+        'effective_neighbors': avg_effective_neighbors,
+        'topk_ratio': avg_topk_ratio,
+    }
 
 
 def calc_metrics_at_k(cf_scores, train_user_dict, test_user_dict, user_ids, item_ids, Ks, kg_dict=None):
