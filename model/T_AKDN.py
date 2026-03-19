@@ -98,6 +98,8 @@ class T_AKDN(nn.Module):
         self.gate_wb_ig = []
         self.gate_ig = []
         self.gate_kg = []
+        self.record_attention = False
+        self.attention_records = []
         
         # Ablation Control
         self.gate_control = 'normal'  # 'normal', 'kg_only', 'ig_only'
@@ -213,6 +215,19 @@ class T_AKDN(nn.Module):
         
         # 7. Edge-level Softmax with temperature τ
         alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
+
+        if self.record_attention:
+            item_edge_mask = self.h_list < self.n_items
+            self.attention_records.append({
+                'layer': len(self.attention_records),
+                'h': self.h_list[item_edge_mask].detach().cpu(),
+                't': self.t_list[item_edge_mask].detach().cpu(),
+                'r': self.r_list[item_edge_mask].detach().cpu(),
+                'sem': sem[item_edge_mask].detach().cpu(),
+                'dist': dist[item_edge_mask].detach().cpu(),
+                'd_tilde_neg': d_tilde_neg[item_edge_mask].detach().cpu(),
+                'alpha': alpha[item_edge_mask].detach().cpu(),
+            })
         
         return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）
 
@@ -324,6 +339,8 @@ class T_AKDN(nn.Module):
             self.gate_wb_ig = []
             self.gate_ig = []
             self.gate_kg = []
+        if self.record_attention:
+            self.attention_records = []
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation + Fusion (最終層はスキップ: dead-end 回避)
