@@ -326,7 +326,7 @@ class T_AKDN(nn.Module):
         e_users = all_embed[self.n_entities:]
         
         user_embeds_list = [e_users]
-        item_collab_embeds_list = [e_entities] 
+        item_dual_embeds_list = [e_entities]
         
         e_items_dual = e_entities
         e_users_curr = e_users
@@ -343,22 +343,18 @@ class T_AKDN(nn.Module):
             self.attention_records = []
 
         for i in range(self.n_layers):
-            # KG Attention + Aggregation + Fusion (最終層はスキップ: dead-end 回避)
-            if i < self.n_layers - 1:
-                # Step 0: TransR-Enhanced KG Attention
-                alpha = self._compute_kg_attention(e_entities_curr)
+            # KG Attention + Aggregation + Fusion
+            # 最終層でもKG側を計算し、fused item表現に反映する。
+            alpha = self._compute_kg_attention(e_entities_curr)
 
-                # 1. KG Aggregation (Eq. 1)
-                e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
+            # 1. KG Aggregation (Eq. 1)
+            e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
 
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
             e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
             
-            # 3. Fusion Gate (Eq. 4, 5) — 最終層はIG出力をそのまま使用
-            if i < self.n_layers - 1:
-                e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
-            else:
-                e_items_dual_new = e_items_collab
+            # 3. Fusion Gate (Eq. 4, 5)
+            e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
             
             # 4. Message Dropout
             if self.mess_dropout[i] > 0.0:
@@ -366,19 +362,18 @@ class T_AKDN(nn.Module):
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
                  e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
 
-            item_collab_embeds_list.append(e_items_collab)
+            item_dual_embeds_list.append(e_items_dual_new)
             user_embeds_list.append(e_users_new)
             
             e_items_dual = e_items_dual_new
             e_users_curr = e_users_new
             
             # KG側入力の更新 (論文準拠: KG側にIGの情報は含まない)
-            if i < self.n_layers - 1:
-                e_entities_curr = e_items_kg 
+            e_entities_curr = e_items_kg 
             
 
         # 最終表現 (Eq. 7)
-        item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)
+        item_final = torch.stack(item_dual_embeds_list, dim=1).sum(dim=1)
         user_final = torch.stack(user_embeds_list, dim=1).sum(dim=1)
         
         return torch.cat([item_final, user_final], dim=0)
