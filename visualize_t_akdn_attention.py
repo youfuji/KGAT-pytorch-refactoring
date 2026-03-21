@@ -11,6 +11,7 @@ import torch
 from data_loader.loader_akdn import DataLoaderAKDN
 from model.T_AKDN import T_AKDN
 from parser.parser_t_akdn import parse_t_akdn_args
+from utils.metrics import compute_attention_diagnostics_from_alpha
 from utils.model_helper import load_model
 
 # python visualize_t_akdn_attention.py \
@@ -202,6 +203,22 @@ def filter_records_by_layer(records, local_args):
     return [record for record in records if record['layer'] in requested]
 
 
+def compute_layer_attention_diagnostics(record, n_items, threshold, top_k):
+    diagnostics = compute_attention_diagnostics_from_alpha(
+        alpha=record['alpha'],
+        h_list=record['h'],
+        n_items=n_items,
+        threshold=threshold,
+        top_k=top_k,
+    )
+    diagnostics.update({
+        'layer': record['layer'] + 1,
+        'threshold': threshold,
+        'top_k': top_k,
+    })
+    return diagnostics
+
+
 def main():
     args, local_args = parse_attention_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -254,6 +271,7 @@ def main():
     ensure_dir(attention_dir)
 
     summary_rows = []
+    diagnostics_rows = []
     focus_items = collect_focus_items(records, local_args)
     logging.info('Focus items: %s', focus_items)
 
@@ -267,6 +285,26 @@ def main():
     for record in records:
         layer_dir = os.path.join(attention_dir, 'layer_{}'.format(record['layer'] + 1))
         ensure_dir(layer_dir)
+
+        diagnostics = compute_layer_attention_diagnostics(
+            record,
+            n_items=data.n_items,
+            threshold=args.attn_diag_threshold,
+            top_k=args.attn_diag_top_k,
+        )
+        diagnostics_rows.append(diagnostics)
+        pd.DataFrame([diagnostics]).to_csv(
+            os.path.join(layer_dir, 'attention_diagnostics.csv'),
+            index=False,
+        )
+        logging.info(
+            'Layer %d diagnostics | Effective Neighbors (> %.2f): %.4f | Top-%d Attention Ratio: %.4f',
+            diagnostics['layer'],
+            diagnostics['threshold'],
+            diagnostics['effective_neighbors'],
+            diagnostics['top_k'],
+            diagnostics['topk_ratio'],
+        )
 
         for key, color in colors.items():
             stats = summarize_tensor(record[key])
@@ -299,6 +337,8 @@ def main():
 
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(os.path.join(attention_dir, 'attention_summary.csv'), index=False)
+    diagnostics_df = pd.DataFrame(diagnostics_rows)
+    diagnostics_df.to_csv(os.path.join(attention_dir, 'attention_diagnostics_summary.csv'), index=False)
     logging.info('Saved attention visualizations to %s', attention_dir)
 
 
