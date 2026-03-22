@@ -14,7 +14,7 @@ class T_AKDN(nn.Module):
       2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
       3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
       4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-            5. pi = s_sem + λ * Z-score(-s_dist)   (λ is annealed, not learned)
+            5. pi = Z-score(s_sem) + λ * Z-score(-s_dist)   (λ is annealed, not learned)
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
@@ -152,6 +152,29 @@ class T_AKDN(nn.Module):
         alpha = exp_logits / (sum_exp[self.h_list] + 1e-16)
         return alpha
 
+    def _neighbor_zscore(self, values):
+        """
+        Z-score normalize edge values within each center node neighborhood.
+
+        Args:
+            values: [E] edge-wise values aligned with self.h_list
+        Returns:
+            [E] z-scored values per center node
+        """
+        ones = torch.ones_like(values)
+        count = torch.zeros(self.n_entities, device=values.device, dtype=values.dtype)
+        count = count.index_add(0, self.h_list, ones).clamp(min=1)  # [N]
+
+        mean = torch.zeros(self.n_entities, device=values.device, dtype=values.dtype)
+        mean = mean.index_add(0, self.h_list, values) / count       # [N]
+
+        diff_sq = (values - mean[self.h_list]) ** 2                 # [E]
+        var = torch.zeros(self.n_entities, device=values.device, dtype=values.dtype)
+        var = var.index_add(0, self.h_list, diff_sq) / count        # [N]
+        std = (var + 1e-8).sqrt()                                   # [N]
+
+        return (values - mean[self.h_list]) / std[self.h_list]      # [E]
+
     def _compute_kg_attention(self, e_entities_curr):
         """
         Hybrid KG Attention (A_kg) を計算 (Differentiable)
@@ -161,8 +184,9 @@ class T_AKDN(nn.Module):
           2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
           3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
           4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-                    5. d_tilde_neg = Z-score(-s_dist)  per center node
-                    6. pi = s_sem + λ * d_tilde_neg
+                    5. sem_tilde = Z-score(s_sem)      per center node
+                    6. d_tilde_neg = Z-score(-s_dist)  per center node
+                    7. pi = sem_tilde + λ * d_tilde_neg
         
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, d)
@@ -192,28 +216,18 @@ class T_AKDN(nn.Module):
         
         # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
         dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
-        
-        # 5. ★ Z-score normalization of (-dist) per center node (近傍内Z変換)
-        #    中心ノード i の近傍集合内で -s_dist を標準化
+
+        # 5. ★ Z-score normalization of s_sem per center node (近傍内Z変換)
+        sem_tilde = self._neighbor_zscore(sem)                      # [E]
+
+        # 6. ★ Z-score normalization of (-dist) per center node (近傍内Z変換)
         neg_dist = -dist
-        ones = torch.ones_like(neg_dist)
-        count = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
-        count = count.index_add(0, self.h_list, ones).clamp(min=1)  # [N]
+        d_tilde_neg = self._neighbor_zscore(neg_dist)               # [E]
         
-        mu = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
-        mu = mu.index_add(0, self.h_list, neg_dist) / count         # [N] 近傍平均
+        # 7. Combined logit: pi = Z-score(s_sem) + λ * Z-score(-s_dist)
+        attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
         
-        diff_sq = (neg_dist - mu[self.h_list]) ** 2                 # [E]
-        var = torch.zeros(self.n_entities, device=dist.device, dtype=dist.dtype)
-        var = var.index_add(0, self.h_list, diff_sq) / count        # [N] 近傍分散
-        sigma = (var + 1e-8).sqrt()                                 # [N] 近傍標準偏差
-        
-        d_tilde_neg = (neg_dist - mu[self.h_list]) / sigma[self.h_list]  # [E] 標準化距離
-        
-        # 6. Combined logit: pi = sem + λ * Z-score(-s_dist)  (λ is annealed)
-        attention_values = sem + self.lambda_val * d_tilde_neg       # [E]
-        
-        # 7. Edge-level Softmax with temperature τ
+        # 8. Edge-level Softmax with temperature τ
         alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
 
         if self.record_attention:
@@ -224,6 +238,7 @@ class T_AKDN(nn.Module):
                 't': self.t_list[item_edge_mask].detach().cpu(),
                 'r': self.r_list[item_edge_mask].detach().cpu(),
                 'sem': sem[item_edge_mask].detach().cpu(),
+                'sem_tilde': sem_tilde[item_edge_mask].detach().cpu(),
                 'dist': dist[item_edge_mask].detach().cpu(),
                 'd_tilde_neg': d_tilde_neg[item_edge_mask].detach().cpu(),
                 'alpha': alpha[item_edge_mask].detach().cpu(),
