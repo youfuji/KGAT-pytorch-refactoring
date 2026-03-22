@@ -79,7 +79,7 @@ def parse_t_akdn_args():
     args = parser.parse_args()
 
     # T-AKDN用の保存ディレクトリ設定
-    save_dir = 'trained_model/T_AKDN_Zonly/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
+    save_dir = 'trained_model/T_AKDN_Zonly_Attention_Layer3/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
         args.data_name, args.embed_dim, args.relation_dim, args.transr_dim,
         args.lr, args.use_pretrain)
     args.save_dir = save_dir
