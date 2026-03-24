@@ -75,6 +75,8 @@ class AKDN(nn.Module):
         self.gate_wb_ig = []
         self.gate_ig = []
         self.gate_kg = []
+        self.record_attention = False
+        self.attention_records = []
         
         # Ablation Control
         self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
@@ -188,6 +190,17 @@ class AKDN(nn.Module):
         
         # 3. Edge Softmax (per-head normalization)
         alpha = self._edge_softmax(attention_values)
+
+        if self.record_attention:
+            item_edge_mask = self.h_list < self.n_items
+            self.attention_records.append({
+                'layer': len(self.attention_records),
+                'h': self.h_list[item_edge_mask].detach().cpu(),
+                't': self.t_list[item_edge_mask].detach().cpu(),
+                'r': self.r_list[item_edge_mask].detach().cpu(),
+                'attention_value': attention_values[item_edge_mask].detach().cpu(),
+                'alpha': alpha[item_edge_mask].detach().cpu(),
+            })
         
         return alpha  # [E]
 
@@ -319,6 +332,8 @@ class AKDN(nn.Module):
             self.gate_wb_ig = []
             self.gate_ig = []
             self.gate_kg = []
+        if self.record_attention:
+            self.attention_records = []
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation
