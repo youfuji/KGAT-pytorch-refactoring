@@ -135,6 +135,7 @@ def plot_item_edges(record, item_id, top_k, save_path):
         'tail': record['t'][item_mask].numpy(),
         'relation': record['r'][item_mask].numpy(),
         'sem': record['sem'][item_mask].numpy(),
+        'sem_tilde': record['sem_tilde'][item_mask].numpy(),
         'dist': record['dist'][item_mask].numpy(),
         'd_tilde_neg': record['d_tilde_neg'][item_mask].numpy(),
         'alpha': record['alpha'][item_mask].numpy(),
@@ -142,13 +143,14 @@ def plot_item_edges(record, item_id, top_k, save_path):
 
     labels = ['t{}|r{}'.format(int(t), int(r)) for t, r in zip(df['tail'], df['relation'])]
     x = np.arange(len(df))
-    width = 0.2
+    width = 0.16
 
     plt.figure(figsize=(max(8, len(df) * 1.4), 6))
-    plt.bar(x - 1.5 * width, df['sem'], width=width, label='sem', color='tab:blue')
-    plt.bar(x - 0.5 * width, df['dist'], width=width, label='dist', color='tab:orange')
-    plt.bar(x + 0.5 * width, df['d_tilde_neg'], width=width, label='d_tilde_neg', color='tab:green')
-    plt.bar(x + 1.5 * width, df['alpha'], width=width, label='alpha', color='tab:red')
+    plt.bar(x - 2.0 * width, df['sem'], width=width, label='sem', color='tab:blue')
+    plt.bar(x - 1.0 * width, df['sem_tilde'], width=width, label='sem_tilde', color='tab:purple')
+    plt.bar(x + 0.0 * width, df['dist'], width=width, label='dist', color='tab:orange')
+    plt.bar(x + 1.0 * width, df['d_tilde_neg'], width=width, label='d_tilde_neg', color='tab:green')
+    plt.bar(x + 2.0 * width, df['alpha'], width=width, label='alpha', color='tab:red')
     plt.xticks(x, labels, rotation=45, ha='right')
     plt.title('Layer {}: item {} top-{} edges'.format(record['layer'] + 1, item_id, len(df)))
     plt.ylabel('Value')
@@ -166,6 +168,7 @@ def export_layer_tables(record, save_dir, top_k):
         'tail_entity': record['t'].numpy(),
         'relation': record['r'].numpy(),
         'sem': record['sem'].numpy(),
+        'sem_tilde': record['sem_tilde'].numpy(),
         'dist': record['dist'].numpy(),
         'd_tilde_neg': record['d_tilde_neg'].numpy(),
         'alpha': record['alpha'].numpy(),
@@ -277,6 +280,7 @@ def main():
 
     colors = {
         'sem': 'tab:blue',
+        'sem_tilde': 'tab:purple',
         'dist': 'tab:orange',
         'd_tilde_neg': 'tab:green',
         'alpha': 'tab:red',
