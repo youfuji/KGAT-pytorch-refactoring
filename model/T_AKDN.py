@@ -36,7 +36,10 @@ class T_AKDN(nn.Module):
         self.n_layers = len(eval(args.conv_dim_list))
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
-        self.tau = args.tau  # Attention softmax temperature
+        self.tau_init = float(args.tau)
+        self.tau_min = float(getattr(args, 'tau_min', 0.1))
+        self.tau_max = float(getattr(args, 'tau_max', 10.0))
+        self.tau_hidden_dim = int(getattr(args, 'tau_hidden_dim', self.embed_dim))
         
         # --- T-AKDN specific: λ (annealing, not learned) ---
         self.register_buffer('lambda_val', torch.tensor([0.0], dtype=torch.float))
@@ -72,6 +75,20 @@ class T_AKDN(nn.Module):
         self.W_k = nn.Linear(self.transr_dim * 2, self.transr_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
 
+        # GRU-based temperature controller: layer-wise tau_l を生成する
+        self.tau_gru = nn.GRUCell(self.embed_dim * 2, self.tau_hidden_dim)
+        self.tau_out = nn.Linear(self.tau_hidden_dim, 1)
+        self.tau_h0 = nn.Parameter(torch.zeros(1, self.tau_hidden_dim))
+        nn.init.xavier_uniform_(self.tau_gru.weight_ih)
+        nn.init.orthogonal_(self.tau_gru.weight_hh)
+        nn.init.zeros_(self.tau_gru.bias_ih)
+        nn.init.zeros_(self.tau_gru.bias_hh)
+        nn.init.zeros_(self.tau_out.weight)
+        tau_ratio = (self.tau_init - self.tau_min) / max(self.tau_max - self.tau_min, 1e-8)
+        tau_ratio = min(max(tau_ratio, 1e-4), 1.0 - 1e-4)
+        tau_logit = torch.logit(torch.tensor([tau_ratio], dtype=torch.float))
+        self.tau_out.bias = nn.Parameter(tau_logit)
+
         # === Fusion Gate Parameters (Eq. 4) ===
         self.W_a = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.W_b = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -100,6 +117,7 @@ class T_AKDN(nn.Module):
         self.gate_kg = []
         self.record_attention = False
         self.attention_records = []
+        self.tau_records = []
         
         # Ablation Control
         self.gate_control = 'normal'  # 'normal', 'kg_only', 'ig_only'
@@ -175,7 +193,19 @@ class T_AKDN(nn.Module):
 
         return (values - mean[self.h_list]) / std[self.h_list]      # [E]
 
-    def _compute_kg_attention(self, e_entities_curr):
+    def _compute_layer_tau(self, e_entities_curr, e_users_curr, tau_hidden):
+        """
+        Layer-wise GRU state から attention temperature tau_l を生成する。
+        """
+        gru_input = torch.cat([
+            e_entities_curr.mean(dim=0, keepdim=True),
+            e_users_curr.mean(dim=0, keepdim=True),
+        ], dim=-1)
+        tau_hidden = self.tau_gru(gru_input, tau_hidden)
+        tau = self.tau_min + (self.tau_max - self.tau_min) * torch.sigmoid(self.tau_out(tau_hidden))
+        return tau.squeeze(), tau_hidden
+
+    def _compute_kg_attention(self, e_entities_curr, tau):
         """
         Hybrid KG Attention (A_kg) を計算 (Differentiable)
         
@@ -227,13 +257,14 @@ class T_AKDN(nn.Module):
         # 7. Combined logit: pi = Z-score(s_sem) + λ * Z-score(-s_dist)
         attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
         
-        # 8. Edge-level Softmax with temperature τ
-        alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
+        # 8. Edge-level Softmax with temperature τ_l
+        alpha = self._edge_softmax(attention_values, tau=tau)  # [E], sum-to-1 per center node
 
         if self.record_attention:
             item_edge_mask = self.h_list < self.n_items
             self.attention_records.append({
                 'layer': len(self.attention_records),
+                'tau': float(tau.detach().cpu()),
                 'h': self.h_list[item_edge_mask].detach().cpu(),
                 't': self.t_list[item_edge_mask].detach().cpu(),
                 'r': self.r_list[item_edge_mask].detach().cpu(),
@@ -354,13 +385,18 @@ class T_AKDN(nn.Module):
             self.gate_wb_ig = []
             self.gate_ig = []
             self.gate_kg = []
+        self.tau_records = []
         if self.record_attention:
             self.attention_records = []
+
+        tau_hidden = self.tau_h0.expand(1, -1)
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation + Fusion
             # 最終層でもKG側を計算し、fused item表現に反映する。
-            alpha = self._compute_kg_attention(e_entities_curr)
+            tau, tau_hidden = self._compute_layer_tau(e_entities_curr, e_users_curr, tau_hidden)
+            self.tau_records.append(float(tau.detach().cpu()))
+            alpha = self._compute_kg_attention(e_entities_curr, tau)
 
             # 1. KG Aggregation (Eq. 1)
             e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
