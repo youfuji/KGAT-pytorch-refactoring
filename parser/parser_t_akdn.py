@@ -51,6 +51,9 @@ def parse_t_akdn_args():
                         help='Upper bound for GRU-generated attention temperature.')
     parser.add_argument('--tau_hidden_dim', type=int, default=64,
                         help='Hidden size of the GRU used to generate layer-wise tau.')
+    parser.add_argument('--att_chunk_size', type=int, default=0,
+                        help='Chunk size for attention computation to prevent OOM. 0 = no chunking (default). '
+                             'Recommended: 262144 for Yelp2018.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
