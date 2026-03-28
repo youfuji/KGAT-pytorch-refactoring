@@ -18,8 +18,7 @@ class T_AKDN(nn.Module):
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
-                 user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):
-
+                 user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(T_AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
 
@@ -36,19 +35,11 @@ class T_AKDN(nn.Module):
         self.edge_dropout_rate = edge_dropout_rate
         self.n_layers = len(eval(args.conv_dim_list))
 
-        # Attention chunk size for OOM prevention (0 = no chunking)
-        self.att_chunk_size = int(getattr(args, 'att_chunk_size', 0))
-
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
         self.tau_init = float(args.tau)
         self.tau_min = float(getattr(args, 'tau_min', 0.1))
         self.tau_max = float(getattr(args, 'tau_max', 10.0))
         self.tau_hidden_dim = int(getattr(args, 'tau_hidden_dim', self.embed_dim))
-
-        # --- Ablation toggle flags ---
-        self.use_gru_tau = bool(getattr(args, 'use_gru_tau', 1))
-        self.use_dist_penalty = bool(getattr(args, 'use_dist_penalty', 1))
-        self.use_neighbor_zscore = bool(getattr(args, 'use_neighbor_zscore', 1))
         
         # --- T-AKDN specific: λ (annealing, not learned) ---
         self.register_buffer('lambda_val', torch.tensor([0.0], dtype=torch.float))
@@ -85,19 +76,18 @@ class T_AKDN(nn.Module):
         nn.init.xavier_uniform_(self.W_k.weight)
 
         # GRU-based temperature controller: layer-wise tau_l を生成する
-        if self.use_gru_tau:
-            self.tau_gru = nn.GRUCell(self.embed_dim * 2, self.tau_hidden_dim)
-            self.tau_out = nn.Linear(self.tau_hidden_dim, 1)
-            self.tau_h0 = nn.Parameter(torch.zeros(1, self.tau_hidden_dim))
-            nn.init.xavier_uniform_(self.tau_gru.weight_ih)
-            nn.init.orthogonal_(self.tau_gru.weight_hh)
-            nn.init.zeros_(self.tau_gru.bias_ih)
-            nn.init.zeros_(self.tau_gru.bias_hh)
-            nn.init.zeros_(self.tau_out.weight)
-            tau_ratio = (self.tau_init - self.tau_min) / max(self.tau_max - self.tau_min, 1e-8)
-            tau_ratio = min(max(tau_ratio, 1e-4), 1.0 - 1e-4)
-            tau_logit = torch.logit(torch.tensor([tau_ratio], dtype=torch.float))
-            self.tau_out.bias = nn.Parameter(tau_logit)
+        self.tau_gru = nn.GRUCell(self.embed_dim * 2, self.tau_hidden_dim)
+        self.tau_out = nn.Linear(self.tau_hidden_dim, 1)
+        self.tau_h0 = nn.Parameter(torch.zeros(1, self.tau_hidden_dim))
+        nn.init.xavier_uniform_(self.tau_gru.weight_ih)
+        nn.init.orthogonal_(self.tau_gru.weight_hh)
+        nn.init.zeros_(self.tau_gru.bias_ih)
+        nn.init.zeros_(self.tau_gru.bias_hh)
+        nn.init.zeros_(self.tau_out.weight)
+        tau_ratio = (self.tau_init - self.tau_min) / max(self.tau_max - self.tau_min, 1e-8)
+        tau_ratio = min(max(tau_ratio, 1e-4), 1.0 - 1e-4)
+        tau_logit = torch.logit(torch.tensor([tau_ratio], dtype=torch.float))
+        self.tau_out.bias = nn.Parameter(tau_logit)
 
         # === Fusion Gate Parameters (Eq. 4) ===
         self.W_a = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -215,35 +205,6 @@ class T_AKDN(nn.Module):
         tau = self.tau_min + (self.tau_max - self.tau_min) * torch.sigmoid(self.tau_out(tau_hidden))
         return tau.squeeze(), tau_hidden
 
-    def _compute_local_scores(self, e_entities_curr, h_idx, t_idx, r_idx):
-        """
-        エッジのサブセットに対して sem と dist を計算する（ローカル演算のみ）。
-        Z-score / softmax は全エッジ結合後に呼び出し側で行う。
-
-        Returns:
-            sem:  [len(h_idx)] semantic scores
-            dist: [len(h_idx)] distance scores
-        """
-        k = self.transr_dim
-        d = self.embed_dim
-
-        h_embed = F.normalize(e_entities_curr[h_idx], p=2, dim=-1, eps=1e-5)
-        t_embed = F.normalize(e_entities_curr[t_idx], p=2, dim=-1, eps=1e-5)
-
-        M = self.transr_proj(r_idx).view(-1, k, d)
-        e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)
-        e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)
-        e_r  = F.normalize(self.relation_embed_k(r_idx), p=2, dim=-1, eps=1e-5)
-
-        cat_embed = torch.cat([e_vr, e_ir], dim=-1)
-        q = self.W_k(cat_embed)
-        sem = torch.sum(q * e_r, dim=-1)
-        sem = self.leakyrelu(sem)
-
-        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
-
-        return sem, dist
-
     def _compute_kg_attention(self, e_entities_curr, tau):
         """
         Hybrid KG Attention (A_kg) を計算 (Differentiable)
@@ -260,62 +221,59 @@ class T_AKDN(nn.Module):
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, d)
         """
-        E = self.n_edges
-        C = self.att_chunk_size
+        k = self.transr_dim
+        d = self.embed_dim
 
-        if C > 0 and E > C:
-            # --- チャンク分割モード ---
-            sem_chunks = []
-            dist_chunks = []
-            for start in range(0, E, C):
-                end = min(start + C, E)
-                h_c = self.h_list[start:end]
-                t_c = self.t_list[start:end]
-                r_c = self.r_list[start:end]
-                sem_c, dist_c = self._compute_local_scores(e_entities_curr, h_c, t_c, r_c)
-                sem_chunks.append(sem_c)
-                dist_chunks.append(dist_c)
-            sem  = torch.cat(sem_chunks, dim=0)   # [E]
-            dist = torch.cat(dist_chunks, dim=0)  # [E]
-        else:
-            # --- 一括処理モード（従来動作） ---
-            sem, dist = self._compute_local_scores(
-                e_entities_curr, self.h_list, self.t_list, self.r_list)
-
-        # Combine scores based on ablation flags
-        if self.use_neighbor_zscore:
-            sem_tilde   = self._neighbor_zscore(sem)       # [E]
-            if self.use_dist_penalty:
-                d_tilde_neg = self._neighbor_zscore(-dist)     # [E]
-                attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
-            else:
-                attention_values = sem_tilde  # [E]
-        else:
-            if self.use_dist_penalty:
-                attention_values = sem + self.lambda_val * (-dist)  # [E]
-            else:
-                attention_values = sem  # [E]
+        # 1. Embedding lookup + L2正規化 (Unit Sphere Constraint)
+        # 重要: h = 中心ノード(self/head = e_i), t = 近傍(neighbor/tail = e_v)
+        #   既存AKDNコメント: "Tailが近傍(neighbors)、Headが中心"
+        h_embed = F.normalize(e_entities_curr[self.h_list], p=2, dim=-1, eps=1e-5)  # [E, d] center (e_i)
+        t_embed = F.normalize(e_entities_curr[self.t_list], p=2, dim=-1, eps=1e-5)  # [E, d] neighbor (e_v)
         
-        # Edge-level Softmax with temperature τ_l
-        alpha = self._edge_softmax(attention_values, tau=tau)  # [E]
+        # 2. TransR投影: e_{i,r} = M_r * e_i, e_{v,r} = M_r * e_v
+        r_id = self.r_list                                          # [E]
+        M = self.transr_proj(r_id).view(-1, k, d)                   # [E, k, d]
+        e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)      # [E, k] center
+        e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)      # [E, k] neighbor
+        e_r  = F.normalize(self.relation_embed_k(r_id), p=2, dim=-1, eps=1e-5)  # [E, k]
+        
+        # 3. Semantic score: LeakyReLU( e_r^T * W_k(cat(e_{v,r}, e_{i,r})) )
+        # concat順は既存AKDNに合わせて [neighbor, center] = [e_vr, e_ir]
+        cat_embed = torch.cat([e_vr, e_ir], dim=-1)                 # [E, 2k]
+        q = self.W_k(cat_embed)                                     # [E, k]
+        sem = torch.sum(q * e_r, dim=-1)                            # [E]
+        sem = self.leakyrelu(sem)                                   # [E]
+        
+        # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
+        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
+
+        # 5. ★ Z-score normalization of s_sem per center node (近傍内Z変換)
+        sem_tilde = self._neighbor_zscore(sem)                      # [E]
+
+        # 6. ★ Z-score normalization of (-dist) per center node (近傍内Z変換)
+        neg_dist = -dist
+        d_tilde_neg = self._neighbor_zscore(neg_dist)               # [E]
+        
+        # 7. Combined logit: pi = Z-score(s_sem) + λ * Z-score(-s_dist)
+        attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
+        
+        # 8. Edge-level Softmax with temperature τ_l
+        alpha = self._edge_softmax(attention_values, tau=tau)  # [E], sum-to-1 per center node
 
         if self.record_attention:
             item_edge_mask = self.h_list < self.n_items
-            record = {
+            self.attention_records.append({
                 'layer': len(self.attention_records),
-                'tau': float(tau.detach().cpu()) if torch.is_tensor(tau) else float(tau),
+                'tau': float(tau.detach().cpu()),
                 'h': self.h_list[item_edge_mask].detach().cpu(),
                 't': self.t_list[item_edge_mask].detach().cpu(),
                 'r': self.r_list[item_edge_mask].detach().cpu(),
                 'sem': sem[item_edge_mask].detach().cpu(),
+                'sem_tilde': sem_tilde[item_edge_mask].detach().cpu(),
                 'dist': dist[item_edge_mask].detach().cpu(),
+                'd_tilde_neg': d_tilde_neg[item_edge_mask].detach().cpu(),
                 'alpha': alpha[item_edge_mask].detach().cpu(),
-            }
-            if self.use_neighbor_zscore:
-                record['sem_tilde'] = sem_tilde[item_edge_mask].detach().cpu()
-                if self.use_dist_penalty:
-                    record['d_tilde_neg'] = d_tilde_neg[item_edge_mask].detach().cpu()
-            self.attention_records.append(record)
+            })
         
         return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）
 
@@ -374,25 +332,15 @@ class T_AKDN(nn.Module):
             drop_mask = (torch.rand(alpha.size(0), device=alpha.device) >= self.edge_dropout_rate).float()
             alpha = alpha * drop_mask / (1.0 - self.edge_dropout_rate)
         
-        E = alpha.size(0)
-        C = self.att_chunk_size
-        d = e_entities_curr.size(1)
-
-        e_items_kg = torch.zeros(self.n_entities, d, device=e_entities_curr.device)
-
-        if C > 0 and E > C:
-            # --- チャンク分割モード ---
-            for start in range(0, E, C):
-                end = min(start + C, E)
-                t_c = self.t_list[start:end]
-                neighbor_embed = e_entities_curr[t_c]                        # [C, d]
-                weighted = alpha[start:end].unsqueeze(-1) * neighbor_embed   # [C, d]
-                e_items_kg = e_items_kg.index_add(0, self.h_list[start:end], weighted)
-        else:
-            # --- 一括処理モード（従来動作） ---
-            neighbor_embed = e_entities_curr[self.t_list]                    # [E, d]
-            weighted = alpha.unsqueeze(-1) * neighbor_embed                 # [E, d]
-            e_items_kg = e_items_kg.index_add(0, self.h_list, weighted)      # [N, d]
+        # Scatter-based aggregation: e_i = sum_j alpha_{ij} * e_j
+        neighbor_embed = e_entities_curr[self.t_list]                       # [E, d]
+        weighted = alpha.unsqueeze(-1) * neighbor_embed                    # [E, d]
+        e_items_kg = torch.zeros(self.n_entities, e_entities_curr.size(1),
+                                 device=e_entities_curr.device)
+        e_items_kg = e_items_kg.index_add(0, self.h_list, weighted)        # [N, d]
+        
+        # スケールリセット: 巨大勾配の前層逆流を防ぐ防波堤
+        # e_items_kg = F.normalize(e_items_kg, p=2, dim=-1, eps=1e-5)
         
         return e_items_kg
 
@@ -441,16 +389,13 @@ class T_AKDN(nn.Module):
         if self.record_attention:
             self.attention_records = []
 
-        tau_hidden = self.tau_h0.expand(1, -1) if self.use_gru_tau else None
+        tau_hidden = self.tau_h0.expand(1, -1)
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation + Fusion
             # 最終層でもKG側を計算し、fused item表現に反映する。
-            if self.use_gru_tau:
-                tau, tau_hidden = self._compute_layer_tau(e_entities_curr, e_users_curr, tau_hidden)
-            else:
-                tau = self.tau_init
-            self.tau_records.append(float(tau.detach().cpu()) if torch.is_tensor(tau) else float(tau))
+            tau, tau_hidden = self._compute_layer_tau(e_entities_curr, e_users_curr, tau_hidden)
+            self.tau_records.append(float(tau.detach().cpu()))
             alpha = self._compute_kg_attention(e_entities_curr, tau)
 
             # 1. KG Aggregation (Eq. 1)
