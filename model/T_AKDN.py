@@ -44,6 +44,11 @@ class T_AKDN(nn.Module):
         self.tau_min = float(getattr(args, 'tau_min', 0.1))
         self.tau_max = float(getattr(args, 'tau_max', 10.0))
         self.tau_hidden_dim = int(getattr(args, 'tau_hidden_dim', self.embed_dim))
+
+        # --- Ablation toggle flags ---
+        self.use_gru_tau = bool(getattr(args, 'use_gru_tau', 1))
+        self.use_dist_penalty = bool(getattr(args, 'use_dist_penalty', 1))
+        self.use_neighbor_zscore = bool(getattr(args, 'use_neighbor_zscore', 1))
         
         # --- T-AKDN specific: λ (annealing, not learned) ---
         self.register_buffer('lambda_val', torch.tensor([0.0], dtype=torch.float))
@@ -80,18 +85,19 @@ class T_AKDN(nn.Module):
         nn.init.xavier_uniform_(self.W_k.weight)
 
         # GRU-based temperature controller: layer-wise tau_l を生成する
-        self.tau_gru = nn.GRUCell(self.embed_dim * 2, self.tau_hidden_dim)
-        self.tau_out = nn.Linear(self.tau_hidden_dim, 1)
-        self.tau_h0 = nn.Parameter(torch.zeros(1, self.tau_hidden_dim))
-        nn.init.xavier_uniform_(self.tau_gru.weight_ih)
-        nn.init.orthogonal_(self.tau_gru.weight_hh)
-        nn.init.zeros_(self.tau_gru.bias_ih)
-        nn.init.zeros_(self.tau_gru.bias_hh)
-        nn.init.zeros_(self.tau_out.weight)
-        tau_ratio = (self.tau_init - self.tau_min) / max(self.tau_max - self.tau_min, 1e-8)
-        tau_ratio = min(max(tau_ratio, 1e-4), 1.0 - 1e-4)
-        tau_logit = torch.logit(torch.tensor([tau_ratio], dtype=torch.float))
-        self.tau_out.bias = nn.Parameter(tau_logit)
+        if self.use_gru_tau:
+            self.tau_gru = nn.GRUCell(self.embed_dim * 2, self.tau_hidden_dim)
+            self.tau_out = nn.Linear(self.tau_hidden_dim, 1)
+            self.tau_h0 = nn.Parameter(torch.zeros(1, self.tau_hidden_dim))
+            nn.init.xavier_uniform_(self.tau_gru.weight_ih)
+            nn.init.orthogonal_(self.tau_gru.weight_hh)
+            nn.init.zeros_(self.tau_gru.bias_ih)
+            nn.init.zeros_(self.tau_gru.bias_hh)
+            nn.init.zeros_(self.tau_out.weight)
+            tau_ratio = (self.tau_init - self.tau_min) / max(self.tau_max - self.tau_min, 1e-8)
+            tau_ratio = min(max(tau_ratio, 1e-4), 1.0 - 1e-4)
+            tau_logit = torch.logit(torch.tensor([tau_ratio], dtype=torch.float))
+            self.tau_out.bias = nn.Parameter(tau_logit)
 
         # === Fusion Gate Parameters (Eq. 4) ===
         self.W_a = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -276,30 +282,40 @@ class T_AKDN(nn.Module):
             sem, dist = self._compute_local_scores(
                 e_entities_curr, self.h_list, self.t_list, self.r_list)
 
-        # Z-score normalization（全エッジ必要）
-        sem_tilde   = self._neighbor_zscore(sem)       # [E]
-        d_tilde_neg = self._neighbor_zscore(-dist)     # [E]
-        
-        # Combined logit: pi = Z-score(s_sem) + λ * Z-score(-s_dist)
-        attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
+        # Combine scores based on ablation flags
+        if self.use_neighbor_zscore:
+            sem_tilde   = self._neighbor_zscore(sem)       # [E]
+            if self.use_dist_penalty:
+                d_tilde_neg = self._neighbor_zscore(-dist)     # [E]
+                attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
+            else:
+                attention_values = sem_tilde  # [E]
+        else:
+            if self.use_dist_penalty:
+                attention_values = sem + self.lambda_val * (-dist)  # [E]
+            else:
+                attention_values = sem  # [E]
         
         # Edge-level Softmax with temperature τ_l
         alpha = self._edge_softmax(attention_values, tau=tau)  # [E]
 
         if self.record_attention:
             item_edge_mask = self.h_list < self.n_items
-            self.attention_records.append({
+            record = {
                 'layer': len(self.attention_records),
-                'tau': float(tau.detach().cpu()),
+                'tau': float(tau.detach().cpu()) if torch.is_tensor(tau) else float(tau),
                 'h': self.h_list[item_edge_mask].detach().cpu(),
                 't': self.t_list[item_edge_mask].detach().cpu(),
                 'r': self.r_list[item_edge_mask].detach().cpu(),
                 'sem': sem[item_edge_mask].detach().cpu(),
-                'sem_tilde': sem_tilde[item_edge_mask].detach().cpu(),
                 'dist': dist[item_edge_mask].detach().cpu(),
-                'd_tilde_neg': d_tilde_neg[item_edge_mask].detach().cpu(),
                 'alpha': alpha[item_edge_mask].detach().cpu(),
-            })
+            }
+            if self.use_neighbor_zscore:
+                record['sem_tilde'] = sem_tilde[item_edge_mask].detach().cpu()
+                if self.use_dist_penalty:
+                    record['d_tilde_neg'] = d_tilde_neg[item_edge_mask].detach().cpu()
+            self.attention_records.append(record)
         
         return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）
 
@@ -425,13 +441,16 @@ class T_AKDN(nn.Module):
         if self.record_attention:
             self.attention_records = []
 
-        tau_hidden = self.tau_h0.expand(1, -1)
+        tau_hidden = self.tau_h0.expand(1, -1) if self.use_gru_tau else None
 
         for i in range(self.n_layers):
             # KG Attention + Aggregation + Fusion
             # 最終層でもKG側を計算し、fused item表現に反映する。
-            tau, tau_hidden = self._compute_layer_tau(e_entities_curr, e_users_curr, tau_hidden)
-            self.tau_records.append(float(tau.detach().cpu()))
+            if self.use_gru_tau:
+                tau, tau_hidden = self._compute_layer_tau(e_entities_curr, e_users_curr, tau_hidden)
+            else:
+                tau = self.tau_init
+            self.tau_records.append(float(tau.detach().cpu()) if torch.is_tensor(tau) else float(tau))
             alpha = self._compute_kg_attention(e_entities_curr, tau)
 
             # 1. KG Aggregation (Eq. 1)

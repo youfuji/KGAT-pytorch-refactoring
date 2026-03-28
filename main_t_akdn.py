@@ -125,16 +125,23 @@ def train(args):
         time0 = time()
         model.train()
 
-        # 3-phase Lambda annealing
-        # Phase 1: warmup (λ=init) → Phase 2: linear anneal → Phase 3: saturation (λ=final)
-        if epoch <= args.lambda_warmup_epochs:
-            lam_val = args.lambda_init
-        elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
-            progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
-            lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+        # Lambda setting (only when dist penalty is enabled)
+        if args.use_dist_penalty:
+            if args.use_lambda_annealing:
+                # 3-phase annealing: warmup → linear anneal → saturation
+                if epoch <= args.lambda_warmup_epochs:
+                    lam_val = args.lambda_init
+                elif epoch <= args.lambda_warmup_epochs + args.lambda_anneal_epochs:
+                    progress = (epoch - args.lambda_warmup_epochs) / args.lambda_anneal_epochs
+                    lam_val = args.lambda_init + (args.lambda_final - args.lambda_init) * progress
+                else:
+                    lam_val = args.lambda_final
+            else:
+                # Fixed lambda (uses --lambda_final)
+                lam_val = args.lambda_final
+            model.set_lambda(lam_val)
         else:
-            lam_val = args.lambda_final
-        model.set_lambda(lam_val)
+            lam_val = 0.0
 
         time_cf = time()
         total_loss = 0
