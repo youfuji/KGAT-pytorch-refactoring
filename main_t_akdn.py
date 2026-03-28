@@ -60,12 +60,6 @@ def evaluate(model, dataloader, Ks, device):
     return cf_scores, metrics_dict
 
 
-def format_tau_records(tau_records):
-    if not tau_records:
-        return '[]'
-    return '[' + ', '.join('{:.4f}'.format(tau) for tau in tau_records) + ']'
-
-
 def train(args):
     # seed
     random.seed(args.seed)
@@ -157,12 +151,11 @@ def train(args):
             optimizer.step()
             optimizer.zero_grad()
             total_loss += batch_loss.item()
-            tau_log = format_tau_records(model.tau_records)
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f} | Tau {}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val, tau_log))
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val))
         
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f} | Tau {}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val, format_tau_records(model.tau_records)))
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate

@@ -44,13 +44,7 @@ def parse_t_akdn_args():
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
     parser.add_argument('--tau', type=float, default=1.0,
-                        help='Initial temperature parameter for GRU-based attention softmax control.')
-    parser.add_argument('--tau_min', type=float, default=0.1,
-                        help='Lower bound for GRU-generated attention temperature.')
-    parser.add_argument('--tau_max', type=float, default=10.0,
-                        help='Upper bound for GRU-generated attention temperature.')
-    parser.add_argument('--tau_hidden_dim', type=int, default=64,
-                        help='Hidden size of the GRU used to generate layer-wise tau.')
+                        help='Temperature parameter for attention softmax sharpness control.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
