@@ -13,8 +13,9 @@ class T_AKDN(nn.Module):
       1. L2-normalize e_i, e_v, e_r before TransR projection
       2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
       3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
-      4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-            5. pi = Z-score(s_sem) + λ * Z-score(-s_dist)   (λ is annealed, not learned)
+      4. s_dist = LeakyReLU(W_dist [e_{i,r} || e_r || e_{v,r}] + b)
+         or (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
+      5. pi = norm(s_sem) + λ * norm(s_dist)   (λ is annealed, not learned)
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
@@ -49,6 +50,7 @@ class T_AKDN(nn.Module):
         self.use_gru_tau = bool(getattr(args, 'use_gru_tau', 1))
         self.use_dist_penalty = bool(getattr(args, 'use_dist_penalty', 1))
         self.use_neighbor_zscore = bool(getattr(args, 'use_neighbor_zscore', 1))
+        self.use_concat_dist = bool(getattr(args, 'use_concat_dist', 1))
         
         # --- T-AKDN specific: λ (annealing, not learned) ---
         self.register_buffer('lambda_val', torch.tensor([0.0], dtype=torch.float))
@@ -83,6 +85,11 @@ class T_AKDN(nn.Module):
         # W_k: Linear(2k -> k) — TransR投影後の連結を入力とする
         self.W_k = nn.Linear(self.transr_dim * 2, self.transr_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
+
+        # W_dist: Linear(3k -> 1) — dist を結合型で計算する
+        self.W_dist = nn.Linear(self.transr_dim * 3, 1)
+        nn.init.xavier_uniform_(self.W_dist.weight)
+        nn.init.zeros_(self.W_dist.bias)
 
         # GRU-based temperature controller: layer-wise tau_l を生成する
         if self.use_gru_tau:
@@ -203,6 +210,19 @@ class T_AKDN(nn.Module):
 
         return (values - mean[self.h_list]) / std[self.h_list]      # [E]
 
+    def _global_zscore(self, values):
+        """
+        Globally standardize edge-wise scores.
+
+        Args:
+            values: [E] edge-wise values
+        Returns:
+            [E] globally z-scored values
+        """
+        mean = values.mean()
+        std = values.std(unbiased=False).clamp(min=1e-8)
+        return (values - mean) / std
+
     def _compute_layer_tau(self, e_entities_curr, e_users_curr, tau_hidden):
         """
         Layer-wise GRU state から attention temperature tau_l を生成する。
@@ -222,7 +242,7 @@ class T_AKDN(nn.Module):
 
         Returns:
             sem:  [len(h_idx)] semantic scores
-            dist: [len(h_idx)] distance scores
+            dist: [len(h_idx)] distance-like scores
         """
         k = self.transr_dim
         d = self.embed_dim
@@ -240,7 +260,11 @@ class T_AKDN(nn.Module):
         sem = torch.sum(q * e_r, dim=-1)
         sem = self.leakyrelu(sem)
 
-        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
+        if self.use_concat_dist:
+            dist_input = torch.cat([e_ir, e_r, e_vr], dim=-1)
+            dist = self.leakyrelu(self.W_dist(dist_input).squeeze(-1))
+        else:
+            dist = -torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k
 
         return sem, dist
 
@@ -252,10 +276,11 @@ class T_AKDN(nn.Module):
           1. L2-normalize e_i, e_v, e_r
           2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
           3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
-          4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-                    5. sem_tilde = Z-score(s_sem)      per center node
-                    6. d_tilde_neg = Z-score(-s_dist)  per center node
-                    7. pi = sem_tilde + λ * d_tilde_neg
+          4. s_dist = LeakyReLU(W_dist [e_{i,r} || e_r || e_{v,r}] + b)
+             or - (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
+          5. sem_norm  = standardized(s_sem)
+          6. dist_norm = standardized(s_dist)
+          7. pi = sem_norm + λ * dist_norm
         
         Args:
             e_entities_curr: 現在の層のEntity Embedding (n_entities, d)
@@ -282,19 +307,21 @@ class T_AKDN(nn.Module):
             sem, dist = self._compute_local_scores(
                 e_entities_curr, self.h_list, self.t_list, self.r_list)
 
-        # Combine scores based on ablation flags
+        # Normalize sem/dist to the same scale before fusion.
         if self.use_neighbor_zscore:
-            sem_tilde   = self._neighbor_zscore(sem)       # [E]
+            sem_norm = self._neighbor_zscore(sem)          # [E]
             if self.use_dist_penalty:
-                d_tilde_neg = self._neighbor_zscore(-dist)     # [E]
-                attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
+                dist_norm = self._neighbor_zscore(dist)    # [E]
+                attention_values = sem_norm + self.lambda_val * dist_norm  # [E]
             else:
-                attention_values = sem_tilde  # [E]
+                attention_values = sem_norm  # [E]
         else:
+            sem_norm = self._global_zscore(sem)            # [E]
             if self.use_dist_penalty:
-                attention_values = sem + self.lambda_val * (-dist)  # [E]
+                dist_norm = self._global_zscore(dist)      # [E]
+                attention_values = sem_norm + self.lambda_val * dist_norm  # [E]
             else:
-                attention_values = sem  # [E]
+                attention_values = sem_norm  # [E]
         
         # Edge-level Softmax with temperature τ_l
         alpha = self._edge_softmax(attention_values, tau=tau)  # [E]
@@ -309,12 +336,11 @@ class T_AKDN(nn.Module):
                 'r': self.r_list[item_edge_mask].detach().cpu(),
                 'sem': sem[item_edge_mask].detach().cpu(),
                 'dist': dist[item_edge_mask].detach().cpu(),
+                'sem_norm': sem_norm[item_edge_mask].detach().cpu(),
                 'alpha': alpha[item_edge_mask].detach().cpu(),
             }
-            if self.use_neighbor_zscore:
-                record['sem_tilde'] = sem_tilde[item_edge_mask].detach().cpu()
-                if self.use_dist_penalty:
-                    record['d_tilde_neg'] = d_tilde_neg[item_edge_mask].detach().cpu()
+            if self.use_dist_penalty:
+                record['dist_norm'] = dist_norm[item_edge_mask].detach().cpu()
             self.attention_records.append(record)
         
         return alpha  # [E] — sparse tensor を作らず直接返す（勾配保持のため）

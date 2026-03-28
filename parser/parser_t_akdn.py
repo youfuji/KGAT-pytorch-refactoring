@@ -56,9 +56,11 @@ def parse_t_akdn_args():
     parser.add_argument('--use_gru_tau', type=int, required=True, choices=[0, 1],
                         help='1: GRU-based dynamic tau per layer, 0: fixed tau value.')
     parser.add_argument('--use_dist_penalty', type=int, required=True, choices=[0, 1],
-                        help='1: add lambda*Z(-dist) to attention logit, 0: semantic score only.')
+                        help='1: add lambda*normalized(dist) to attention logit, 0: semantic score only.')
     parser.add_argument('--use_neighbor_zscore', type=int, required=True, choices=[0, 1],
-                        help='1: Z-score normalize scores within neighborhoods, 0: use raw scores.')
+                        help='1: neighborhood-wise Z-score normalization, 0: global Z-score normalization.')
+    parser.add_argument('--use_concat_dist', type=int, required=True, choices=[0, 1],
+                        help='1: use concatenation-based dist score, 0: use negative TransR distance.')
     parser.add_argument('--use_lambda_annealing', type=int, required=True, choices=[0, 1],
                         help='1: 3-phase lambda annealing, 0: fixed lambda (uses --lambda_final value).')
     parser.add_argument('--att_chunk_size', type=int, default=0,
