@@ -13,8 +13,8 @@ class T_AKDN(nn.Module):
       1. L2-normalize e_i, e_v, e_r before TransR projection
       2. e_{i,r} = M_r e_i,  e_{v,r} = M_r e_v
       3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
-      4. s_dist = (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-            5. pi = Z-score(s_sem) + λ * Z-score(-s_dist)   (λ is annealed, not learned)
+      4. s_dist = LeakyReLU( W_dist [e_{i,r} || e_r || e_{v,r}] + b )
+            5. pi = Z-score(s_sem) + λ * Z-score(s_dist)   (λ is annealed, not learned)
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
@@ -71,6 +71,10 @@ class T_AKDN(nn.Module):
         # W_k: Linear(2k -> k) — TransR投影後の連結を入力とする
         self.W_k = nn.Linear(self.transr_dim * 2, self.transr_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
+
+        # W_dist: Linear(3k -> 1) — 結合型距離スコア s_dist = LeakyReLU(W_dist [e_ir||e_r||e_vr] + b)
+        self.W_dist = nn.Linear(self.transr_dim * 3, 1)
+        nn.init.xavier_uniform_(self.W_dist.weight)
 
         # === Fusion Gate Parameters (Eq. 4) ===
         self.W_a = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -214,18 +218,16 @@ class T_AKDN(nn.Module):
         sem = torch.sum(q * e_r, dim=-1)                            # [E]
         sem = self.leakyrelu(sem)                                   # [E]
         
-        # 4. Normalized distance: (1/k) * ||e_{i,r} + e_r - e_{v,r}||^2
-        dist = torch.sum((e_ir + e_r - e_vr) ** 2, dim=-1) / k     # [E]
+        # 4. Concat-type distance: s_dist = LeakyReLU( W_dist [e_{i,r} || e_r || e_{v,r}] + b )
+        dist_concat = torch.cat([e_ir, e_r, e_vr], dim=-1)         # [E, 3k]
+        dist = self.leakyrelu(self.W_dist(dist_concat).squeeze(-1)) # [E]
 
-        # 5. ★ Z-score normalization of s_sem per center node (近傍内Z変換)
+        # 5. ★ Z-score normalization per center node (近傍内Z変換)
         sem_tilde = self._neighbor_zscore(sem)                      # [E]
-
-        # 6. ★ Z-score normalization of (-dist) per center node (近傍内Z変換)
-        neg_dist = -dist
-        d_tilde_neg = self._neighbor_zscore(neg_dist)               # [E]
+        dist_tilde = self._neighbor_zscore(dist)                    # [E]
         
-        # 7. Combined logit: pi = Z-score(s_sem) + λ * Z-score(-s_dist)
-        attention_values = sem_tilde + self.lambda_val * d_tilde_neg  # [E]
+        # 6. Combined logit: pi = Z-score(s_sem) + λ * Z-score(s_dist)
+        attention_values = sem_tilde + self.lambda_val * dist_tilde  # [E]
         
         # 8. Edge-level Softmax with temperature τ
         alpha = self._edge_softmax(attention_values, tau=self.tau)  # [E], sum-to-1 per center node
