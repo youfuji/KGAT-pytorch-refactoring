@@ -24,6 +24,8 @@ from utils.model_helper import load_model
 def parse_attention_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--save_dir', type=str, default=None)
+    parser.add_argument('--log_id', type=int, default=None,
+                        help='Log ID to use for save directory (e.g. 0 for log0/).')
     parser.add_argument('--focus_item', type=int, default=None)
     parser.add_argument('--item_ids', type=str, default=None,
                         help='Comma separated item ids for per-item plots.')
@@ -38,6 +40,10 @@ def parse_attention_args():
 
     if local_args.save_dir:
         base_args.save_dir = local_args.save_dir
+    elif local_args.log_id is not None:
+        # save_dir is auto-numbered; override to use the specified log_id
+        base_dir = os.path.dirname(base_args.save_dir.rstrip('/'))
+        base_args.save_dir = os.path.join(base_dir, 'log{:d}/'.format(local_args.log_id))
 
     return base_args, local_args
 
