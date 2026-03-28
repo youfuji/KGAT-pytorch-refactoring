@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import random
+import sys
 import time
 import types
 from collections import defaultdict
@@ -10,6 +11,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.optim as optim
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from data_loader.loader_akdn import DataLoaderAKDN
 from model.T_AKDN import T_AKDN
@@ -73,6 +78,22 @@ def set_seed(seed):
 def sync_if_needed(device):
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def to_jsonable(obj):
+    if isinstance(obj, dict):
+        return {str(k): to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_jsonable(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [to_jsonable(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, torch.Tensor):
+        if obj.ndim == 0:
+            return obj.item()
+        return obj.detach().cpu().tolist()
+    return obj
 
 
 class TimerStore:
@@ -323,6 +344,7 @@ def profile_train_loop(args):
         "model_method_timing": model_timer.summary(),
         "iterations": iter_summaries,
     }
+    result = to_jsonable(result)
 
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
