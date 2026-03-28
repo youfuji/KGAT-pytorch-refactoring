@@ -43,6 +43,27 @@ def parse_t_akdn_args():
     # --- T-AKDN specific hyperparameters ---
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
+    parser.add_argument('--tau', type=float, default=1.0,
+                        help='Temperature parameter for attention softmax. Used as fixed value when --use_gru_tau=0.')
+    parser.add_argument('--tau_min', type=float, default=0.1,
+                        help='Lower bound for GRU-generated attention temperature.')
+    parser.add_argument('--tau_max', type=float, default=10.0,
+                        help='Upper bound for GRU-generated attention temperature.')
+    parser.add_argument('--tau_hidden_dim', type=int, default=64,
+                        help='Hidden size of the GRU used to generate layer-wise tau.')
+
+    # --- Ablation toggle flags (REQUIRED) ---
+    parser.add_argument('--use_gru_tau', type=int, required=True, choices=[0, 1],
+                        help='1: GRU-based dynamic tau per layer, 0: fixed tau value.')
+    parser.add_argument('--use_dist_penalty', type=int, required=True, choices=[0, 1],
+                        help='1: add lambda*Z(-dist) to attention logit, 0: semantic score only.')
+    parser.add_argument('--use_neighbor_zscore', type=int, required=True, choices=[0, 1],
+                        help='1: Z-score normalize scores within neighborhoods, 0: use raw scores.')
+    parser.add_argument('--use_lambda_annealing', type=int, required=True, choices=[0, 1],
+                        help='1: 3-phase lambda annealing, 0: fixed lambda (uses --lambda_final value).')
+    parser.add_argument('--att_chunk_size', type=int, default=0,
+                        help='Chunk size for attention computation to prevent OOM. 0 = no chunking (default). '
+                             'Recommended: 262144 for Yelp2018.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
@@ -54,6 +75,13 @@ def parse_t_akdn_args():
                         help='Phase 1: epochs with lambda=init (no dist penalty).')
     parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
                         help='Phase 2: epochs to linearly anneal lambda from init to final.')
+
+    # --- Attention Diagnostics ---
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.35,
+                        help='Threshold for effective neighborhood size (alpha > threshold).')
+    parser.add_argument('--attn_diag_top_k', type=int, default=2,
+                        help='Top-K neighbors for attention ratio diagnostic.')
+
     parser.add_argument('--n_epoch', type=int, default=500,
                         help='Number of epoch.')
     parser.add_argument('--stopping_steps', type=int, default=10,
@@ -69,10 +97,14 @@ def parse_t_akdn_args():
 
     args = parser.parse_args()
 
-    # T-AKDN用の保存ディレクトリ設定
-    save_dir = 'trained_model/T_AKDN/{}/embed-dim{}_relation-dim{}_transr-dim{}_lr{}_pretrain{}/'.format(
-        args.data_name, args.embed_dim, args.relation_dim, args.transr_dim,
-        args.lr, args.use_pretrain)
+    # T-AKDN用の保存ディレクトリ設定（logN で自動採番）
+    import os
+    base_dir = 'trained_model/T_AKDN_SWITCH/{}/pretrain{}/'.format(
+        args.data_name, args.use_pretrain)
+    log_count = 0
+    while os.path.exists(os.path.join(base_dir, 'log{:d}'.format(log_count))):
+        log_count += 1
+    save_dir = os.path.join(base_dir, 'log{:d}/'.format(log_count))
     args.save_dir = save_dir
 
     return args

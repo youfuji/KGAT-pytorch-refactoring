@@ -6,12 +6,13 @@ def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
 class AKDN(nn.Module):
-    def __init__(self, args, n_users, n_entities, n_relations, A_in=None,
+    def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
 
         self.n_users = n_users
+        self.n_items = n_items
         self.n_entities = n_entities
         self.n_relations = n_relations
 
@@ -74,6 +75,8 @@ class AKDN(nn.Module):
         self.gate_wb_ig = []
         self.gate_ig = []
         self.gate_kg = []
+        self.record_attention = False
+        self.attention_records = []
         
         # Ablation Control
         self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
@@ -187,6 +190,17 @@ class AKDN(nn.Module):
         
         # 3. Edge Softmax (per-head normalization)
         alpha = self._edge_softmax(attention_values)
+
+        if self.record_attention:
+            item_edge_mask = self.h_list < self.n_items
+            self.attention_records.append({
+                'layer': len(self.attention_records),
+                'h': self.h_list[item_edge_mask].detach().cpu(),
+                't': self.t_list[item_edge_mask].detach().cpu(),
+                'r': self.r_list[item_edge_mask].detach().cpu(),
+                'attention_value': attention_values[item_edge_mask].detach().cpu(),
+                'alpha': alpha[item_edge_mask].detach().cpu(),
+            })
         
         return alpha  # [E]
 
@@ -300,7 +314,7 @@ class AKDN(nn.Module):
         
         # 最終的な表現を格納するリスト (Eq. 7: sum of all layers)
         user_embeds_list = [e_users]
-        item_collab_embeds_list = [e_entities] 
+        item_dual_embeds_list = [e_entities]
         
         # 現在の「Dual Item Representation」 & User & Entity
         # e_items_dual:  IG入力用 (Fusion後のItem表現)
@@ -318,24 +332,21 @@ class AKDN(nn.Module):
             self.gate_wb_ig = []
             self.gate_ig = []
             self.gate_kg = []
+        if self.record_attention:
+            self.attention_records = []
 
         for i in range(self.n_layers):
-            # KG Attention + Aggregation (最終層はスキップ: dead-end 回避)
-            if i < self.n_layers - 1:
-                # Step 0: KG Attention の計算 (Dynamic & Adaptive)
-                alpha = self._compute_kg_attention(e_entities_curr)
+            # KG Attention + Aggregation
+            alpha = self._compute_kg_attention(e_entities_curr)
 
-                # 1. KG Aggregation (Eq. 1)
-                e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
+            # 1. KG Aggregation (Eq. 1)
+            e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
 
             # 2. IG Aggregation (Eq. 3 & Eq. 6)
             e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
             
-            # 3. Fusion Gate (Eq. 4, 5) — 最終層はIG出力をそのまま使用
-            if i < self.n_layers - 1:
-                e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
-            else:
-                e_items_dual_new = e_items_collab
+            # 3. Fusion Gate (Eq. 4, 5)
+            e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
             
             # 4. Message Dropout
             if self.mess_dropout[i] > 0.0:
@@ -344,7 +355,7 @@ class AKDN(nn.Module):
                  e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
 
             # ストック & 更新
-            item_collab_embeds_list.append(e_items_collab)
+            item_dual_embeds_list.append(e_items_dual_new)
             user_embeds_list.append(e_users_new)
             
             # 次の層への入力更新
@@ -352,12 +363,11 @@ class AKDN(nn.Module):
             e_users_curr = e_users_new
             
             # KG側入力の更新 (論文準拠: KG側にIGの情報は含まない)
-            if i < self.n_layers - 1:
-                e_entities_curr = e_items_kg 
+            e_entities_curr = e_items_kg 
             
 
         # 最終表現 (Eq. 7)
-        item_final = torch.stack(item_collab_embeds_list, dim=1).sum(dim=1)
+        item_final = torch.stack(item_dual_embeds_list, dim=1).sum(dim=1)
         user_final = torch.stack(user_embeds_list, dim=1).sum(dim=1)
         
         return torch.cat([item_final, user_final], dim=0)
@@ -394,3 +404,4 @@ class AKDN(nn.Module):
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
         return cf_loss + self.cf_l2loss_lambda * l2_loss
+        

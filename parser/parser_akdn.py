@@ -55,6 +55,12 @@ def parse_akdn_args():
     parser.add_argument('--Ks', nargs='?', default='[20]',
                         help='Calculate metric@K when evaluating.')
 
+    # --- Attention Diagnostics ---
+    parser.add_argument('--attn_diag_threshold', type=float, default=0.35,
+                        help='Threshold for effective neighborhood size (alpha > threshold).')
+    parser.add_argument('--attn_diag_top_k', type=int, default=2,
+                        help='Top-K neighbors for attention ratio diagnostic.')
+
     args = parser.parse_args()
 
     # AKDN用の保存ディレクトリ設定
