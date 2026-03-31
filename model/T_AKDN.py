@@ -244,9 +244,11 @@ class T_AKDN(nn.Module):
     def _compute_layer_lambda(self, e_entities_curr, e_users_curr, lambda_hidden):
         """
         Layer-wise GRU state から attention lambda_l を生成する。
+        入力要約には entity 全体ではなく item 平均と user 平均を用いる。
         """
+        item_embed_mean = e_entities_curr[:self.n_items].mean(dim=0, keepdim=True)
         gru_input = torch.cat([
-            e_entities_curr.mean(dim=0, keepdim=True),
+            item_embed_mean,
             e_users_curr.mean(dim=0, keepdim=True),
         ], dim=-1)
         lambda_hidden = self.lambda_gru(gru_input, lambda_hidden)
