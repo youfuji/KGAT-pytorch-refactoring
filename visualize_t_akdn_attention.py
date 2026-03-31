@@ -354,7 +354,7 @@ def main():
             index=False,
         )
         logging.info(
-            'Layer %d diagnostics | Effective Neighbors (> %.2f): %.4f | Top-%d Attention Ratio: %.4f',
+            'Layer %d Effective Neighbors (> %.2f): %.4f | Top-%d Attention Ratio: %.4f',
             diagnostics['layer'],
             diagnostics['threshold'],
             diagnostics['effective_neighbors'],
