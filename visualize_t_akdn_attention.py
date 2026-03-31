@@ -76,6 +76,33 @@ def summarize_tensor(values):
     }
 
 
+def choose_existing_key(record, candidate_keys):
+    for key in candidate_keys:
+        if key in record:
+            return key
+    return None
+
+
+def build_item_edge_dataframe(record, item_mask):
+    columns = {
+        'tail': record['t'][item_mask].numpy(),
+        'relation': record['r'][item_mask].numpy(),
+        'sem': record['sem'][item_mask].numpy(),
+        'dist': record['dist'][item_mask].numpy(),
+        'alpha': record['alpha'][item_mask].numpy(),
+    }
+
+    sem_variant_key = choose_existing_key(record, ['sem_tilde', 'sem_norm'])
+    if sem_variant_key is not None:
+        columns[sem_variant_key] = record[sem_variant_key][item_mask].numpy()
+
+    dist_variant_key = choose_existing_key(record, ['d_tilde_neg', 'dist_norm'])
+    if dist_variant_key is not None:
+        columns[dist_variant_key] = record[dist_variant_key][item_mask].numpy()
+
+    return pd.DataFrame(columns)
+
+
 def plot_histogram(values, title, xlabel, save_path, color):
     if values.numel() == 0:
         return
@@ -137,26 +164,30 @@ def plot_item_edges(record, item_id, top_k, save_path):
     if int(item_mask.sum().item()) == 0:
         return False
 
-    df = pd.DataFrame({
-        'tail': record['t'][item_mask].numpy(),
-        'relation': record['r'][item_mask].numpy(),
-        'sem': record['sem'][item_mask].numpy(),
-        'sem_tilde': record['sem_tilde'][item_mask].numpy(),
-        'dist': record['dist'][item_mask].numpy(),
-        'd_tilde_neg': record['d_tilde_neg'][item_mask].numpy(),
-        'alpha': record['alpha'][item_mask].numpy(),
-    }).sort_values('alpha', ascending=False).head(top_k)
+    df = build_item_edge_dataframe(record, item_mask).sort_values('alpha', ascending=False).head(top_k)
 
     labels = ['t{}|r{}'.format(int(t), int(r)) for t, r in zip(df['tail'], df['relation'])]
     x = np.arange(len(df))
-    width = 0.16
+    value_columns = [
+        key for key in ['sem', 'sem_tilde', 'sem_norm', 'dist', 'd_tilde_neg', 'dist_norm', 'alpha']
+        if key in df.columns
+    ]
+    width = 0.8 / max(1, len(value_columns))
+    center = (len(value_columns) - 1) / 2.0
+    color_map = {
+        'sem': 'tab:blue',
+        'sem_tilde': 'tab:purple',
+        'sem_norm': 'tab:purple',
+        'dist': 'tab:orange',
+        'd_tilde_neg': 'tab:green',
+        'dist_norm': 'tab:green',
+        'alpha': 'tab:red',
+    }
 
     plt.figure(figsize=(max(8, len(df) * 1.4), 6))
-    plt.bar(x - 2.0 * width, df['sem'], width=width, label='sem', color='tab:blue')
-    plt.bar(x - 1.0 * width, df['sem_tilde'], width=width, label='sem_tilde', color='tab:purple')
-    plt.bar(x + 0.0 * width, df['dist'], width=width, label='dist', color='tab:orange')
-    plt.bar(x + 1.0 * width, df['d_tilde_neg'], width=width, label='d_tilde_neg', color='tab:green')
-    plt.bar(x + 2.0 * width, df['alpha'], width=width, label='alpha', color='tab:red')
+    for idx, key in enumerate(value_columns):
+        offset = (idx - center) * width
+        plt.bar(x + offset, df[key], width=width, label=key, color=color_map.get(key, 'tab:gray'))
     plt.xticks(x, labels, rotation=45, ha='right')
     plt.title('Layer {}: item {} top-{} edges'.format(record['layer'] + 1, item_id, len(df)))
     plt.ylabel('Value')
@@ -169,16 +200,24 @@ def plot_item_edges(record, item_id, top_k, save_path):
 
 
 def export_layer_tables(record, save_dir, top_k):
-    layer_df = pd.DataFrame({
+    layer_dict = {
         'head_item': record['h'].numpy(),
         'tail_entity': record['t'].numpy(),
         'relation': record['r'].numpy(),
         'sem': record['sem'].numpy(),
-        'sem_tilde': record['sem_tilde'].numpy(),
         'dist': record['dist'].numpy(),
-        'd_tilde_neg': record['d_tilde_neg'].numpy(),
         'alpha': record['alpha'].numpy(),
-    })
+    }
+
+    sem_variant_key = choose_existing_key(record, ['sem_tilde', 'sem_norm'])
+    if sem_variant_key is not None:
+        layer_dict[sem_variant_key] = record[sem_variant_key].numpy()
+
+    dist_variant_key = choose_existing_key(record, ['d_tilde_neg', 'dist_norm'])
+    if dist_variant_key is not None:
+        layer_dict[dist_variant_key] = record[dist_variant_key].numpy()
+
+    layer_df = pd.DataFrame(layer_dict)
     layer_df.to_csv(os.path.join(save_dir, 'layer_{}_edges.csv'.format(record['layer'] + 1)), index=False)
     layer_df.sort_values('alpha', ascending=False).head(top_k).to_csv(
         os.path.join(save_dir, 'layer_{}_top_alpha_edges.csv'.format(record['layer'] + 1)),
@@ -287,8 +326,10 @@ def main():
     colors = {
         'sem': 'tab:blue',
         'sem_tilde': 'tab:purple',
+        'sem_norm': 'tab:purple',
         'dist': 'tab:orange',
         'd_tilde_neg': 'tab:green',
+        'dist_norm': 'tab:green',
         'alpha': 'tab:red',
     }
 
@@ -316,7 +357,9 @@ def main():
             diagnostics['topk_ratio'],
         )
 
-        for key, color in colors.items():
+        available_metrics = [key for key in colors.keys() if key in record]
+        for key in available_metrics:
+            color = colors[key]
             stats = summarize_tensor(record[key])
             stats.update({'layer': record['layer'] + 1, 'metric': key})
             summary_rows.append(stats)
