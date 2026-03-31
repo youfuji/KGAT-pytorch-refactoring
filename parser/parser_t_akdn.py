@@ -1,6 +1,18 @@
 import argparse
 
 
+def resolve_t_akdn_save_dir(args):
+    import os
+
+    model_root = 'T_AKDN_JAX' if getattr(args, 'backend', 'torch') == 'jax' else 'T_AKDN_SWITCH'
+    base_dir = 'trained_model/{}/{}/pretrain{}/'.format(
+        model_root, args.data_name, args.use_pretrain)
+    log_count = 0
+    while os.path.exists(os.path.join(base_dir, 'log{:d}'.format(log_count))):
+        log_count += 1
+    return os.path.join(base_dir, 'log{:d}/'.format(log_count))
+
+
 def parse_t_akdn_args():
     parser = argparse.ArgumentParser(description="Run T-AKDN (TransR-enhanced AKDN).")
 
@@ -96,17 +108,16 @@ def parse_t_akdn_args():
 
     parser.add_argument('--Ks', nargs='?', default='[20]',
                         help='Calculate metric@K when evaluating.')
+    parser.add_argument('--backend', type=str, default='torch', choices=['torch', 'jax'],
+                        help='Execution backend. torch keeps the original implementation; jax uses the new JAX path.')
+    parser.add_argument('--jax_disable_jit', type=int, default=0, choices=[0, 1],
+                        help='1: disable JAX jit for debugging.')
+    parser.add_argument('--eval_only', type=int, default=0, choices=[0, 1],
+                        help='1: load a JAX checkpoint and run evaluation only.')
+    parser.add_argument('--precision', type=str, default='float32', choices=['float32', 'float64'],
+                        help='Floating-point precision for the JAX backend.')
 
     args = parser.parse_args()
-
-    # T-AKDN用の保存ディレクトリ設定（logN で自動採番）
-    import os
-    base_dir = 'trained_model/T_AKDN_SWITCH/{}/pretrain{}/'.format(
-        args.data_name, args.use_pretrain)
-    log_count = 0
-    while os.path.exists(os.path.join(base_dir, 'log{:d}'.format(log_count))):
-        log_count += 1
-    save_dir = os.path.join(base_dir, 'log{:d}/'.format(log_count))
-    args.save_dir = save_dir
+    args.save_dir = resolve_t_akdn_save_dir(args)
 
     return args
