@@ -243,5 +243,10 @@ def predict(args):
 
 if __name__ == '__main__':
     args = parse_t_akdn_args()
-    train(args)
+    if getattr(args, 'backend', 'torch') == 'jax':
+        from main_t_akdn_jax import train as train_jax
+
+        train_jax(args)
+    else:
+        train(args)
     # predict(args)

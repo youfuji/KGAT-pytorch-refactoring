@@ -135,7 +135,7 @@ def main():
 
         t1 = time.perf_counter()
         batch = build_batch_dict(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
-        jax.tree_util.tree_map(jax.device_put, batch)
+        batch = jax.tree_util.tree_map(jax.device_put, batch)
         summary["h2d_ms"] = (time.perf_counter() - t1) * 1000.0
 
         t2 = time.perf_counter()

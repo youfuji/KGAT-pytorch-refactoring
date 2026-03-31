@@ -130,10 +130,18 @@ class TAKDNJAX:
 
         if self.use_gru_lambda:
             params["lambda_gru"] = {
-                "weight_ih": self._glorot_uniform(keys[8], (self.embed_dim * 2, self.lambda_hidden_dim * 3)),
-                "weight_hh": self._orthogonal(keys[9], (self.lambda_hidden_dim, self.lambda_hidden_dim * 3)),
-                "bias_ih": jnp.zeros((self.lambda_hidden_dim * 3,), dtype=self.dtype),
-                "bias_hh": jnp.zeros((self.lambda_hidden_dim * 3,), dtype=self.dtype),
+                "weight_ir": self._glorot_uniform(keys[8], (self.embed_dim * 2, self.lambda_hidden_dim)),
+                "weight_iz": self._glorot_uniform(keys[9], (self.embed_dim * 2, self.lambda_hidden_dim)),
+                "weight_in": self._glorot_uniform(keys[10], (self.embed_dim * 2, self.lambda_hidden_dim)),
+                "weight_hr": self._orthogonal(keys[11], (self.lambda_hidden_dim, self.lambda_hidden_dim)),
+                "weight_hz": self._orthogonal(keys[12], (self.lambda_hidden_dim, self.lambda_hidden_dim)),
+                "weight_hn": self._orthogonal(keys[13], (self.lambda_hidden_dim, self.lambda_hidden_dim)),
+                "bias_ir": jnp.zeros((self.lambda_hidden_dim,), dtype=self.dtype),
+                "bias_iz": jnp.zeros((self.lambda_hidden_dim,), dtype=self.dtype),
+                "bias_in": jnp.zeros((self.lambda_hidden_dim,), dtype=self.dtype),
+                "bias_hr": jnp.zeros((self.lambda_hidden_dim,), dtype=self.dtype),
+                "bias_hz": jnp.zeros((self.lambda_hidden_dim,), dtype=self.dtype),
+                "bias_hn": jnp.zeros((self.lambda_hidden_dim,), dtype=self.dtype),
             }
             lambda_ratio = (self.lambda_init - self.lambda_min) / max(self.lambda_max - self.lambda_min, 1e-8)
             lambda_ratio = min(max(lambda_ratio, 1e-4), 1.0 - 1e-4)
@@ -367,14 +375,18 @@ class TAKDNJAX:
         return x * keep_mask / keep_prob
 
     def _gru_cell(self, params, x, h):
-        gates = jnp.matmul(x, params["weight_ih"]) + params["bias_ih"] + jnp.matmul(h, params["weight_hh"]) + params["bias_hh"]
-        r_gate, z_gate, n_gate = jnp.split(gates, 3, axis=-1)
-        r_gate = jax.nn.sigmoid(r_gate)
-        z_gate = jax.nn.sigmoid(z_gate)
-
-        hh_n = jnp.matmul(h, params["weight_hh"][:, 2 * self.lambda_hidden_dim :]) + params["bias_hh"][2 * self.lambda_hidden_dim :]
-        x_n = jnp.matmul(x, params["weight_ih"][:, 2 * self.lambda_hidden_dim :]) + params["bias_ih"][2 * self.lambda_hidden_dim :]
-        n_gate = jnp.tanh(x_n + r_gate * hh_n)
+        r_gate = jax.nn.sigmoid(
+            jnp.matmul(x, params["weight_ir"]) + params["bias_ir"] +
+            jnp.matmul(h, params["weight_hr"]) + params["bias_hr"]
+        )
+        z_gate = jax.nn.sigmoid(
+            jnp.matmul(x, params["weight_iz"]) + params["bias_iz"] +
+            jnp.matmul(h, params["weight_hz"]) + params["bias_hz"]
+        )
+        n_gate = jnp.tanh(
+            jnp.matmul(x, params["weight_in"]) + params["bias_in"] +
+            r_gate * (jnp.matmul(h, params["weight_hn"]) + params["bias_hn"])
+        )
         return (1.0 - z_gate) * n_gate + z_gate * h
 
     def _normalize(self, x):

@@ -216,6 +216,7 @@ def train(args):
             batch = build_batch_dict(cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
             base_rng, step_rng = jax.random.split(base_rng)
             params, opt_state, aux = model.train_step(params, opt_state, batch, step_rng, lambda_value)
+            aux = jax.tree_util.tree_map(jax.device_get, aux)
 
             batch_loss = float(aux["loss"])
             if np.isnan(batch_loss):
