@@ -44,10 +44,7 @@ def parse_args():
 
     parser.add_argument("--transr_dim", type=int, default=64)
     parser.add_argument("--tau", type=float, default=1.0)
-    parser.add_argument("--tau_min", type=float, default=0.1)
-    parser.add_argument("--tau_max", type=float, default=10.0)
-    parser.add_argument("--tau_hidden_dim", type=int, default=64)
-    parser.add_argument("--use_gru_tau", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--use_gru_lambda", type=int, default=0, choices=[0, 1])
     parser.add_argument("--use_dist_penalty", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_neighbor_zscore", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_concat_dist", type=int, default=1, choices=[0, 1])
@@ -55,6 +52,9 @@ def parse_args():
     parser.add_argument("--att_chunk_size", type=int, default=0)
     parser.add_argument("--lambda_init", type=float, default=0.0)
     parser.add_argument("--lambda_final", type=float, default=0.5)
+    parser.add_argument("--lambda_min", type=float, default=0.0)
+    parser.add_argument("--lambda_max", type=float, default=1.0)
+    parser.add_argument("--lambda_hidden_dim", type=int, default=64)
     parser.add_argument("--lambda_warmup_epochs", type=int, default=100)
     parser.add_argument("--lambda_anneal_epochs", type=int, default=400)
 
@@ -140,8 +140,8 @@ def wrap_timed_method(model, timer_store, device, method_name):
 
 def attach_model_profiling(model, timer_store, device):
     method_names = [
-        "_compute_layer_tau",
-        "_fixed_tau",
+        "_compute_layer_lambda",
+        "_fixed_lambda",
         "_compute_local_scores",
         "_compute_kg_attention_full",
         "_compute_kg_attention_chunked",
@@ -230,8 +230,10 @@ def profile_train_loop(args):
 
     model.train()
     epoch = 1
-    lam_val = resolve_lambda(args, epoch)
-    model.set_lambda(lam_val)
+    lam_val = None
+    if not args.use_gru_lambda:
+        lam_val = resolve_lambda(args, epoch)
+        model.set_lambda(lam_val)
 
     for step in range(total_steps):
         summary = {"step": step}
@@ -320,7 +322,7 @@ def profile_train_loop(args):
             "relation_dim": args.relation_dim,
             "transr_dim": args.transr_dim,
             "att_chunk_size": args.att_chunk_size,
-            "use_gru_tau": args.use_gru_tau,
+            "use_gru_lambda": args.use_gru_lambda,
             "use_dist_penalty": args.use_dist_penalty,
             "use_neighbor_zscore": args.use_neighbor_zscore,
             "use_concat_dist": args.use_concat_dist,
@@ -339,6 +341,7 @@ def profile_train_loop(args):
             "profile_steps": args.profile_steps,
             "total_steps": total_steps,
             "lambda_value": lam_val,
+            "lambda_records": model.lambda_records,
         },
         "phase_avg_ms": avg_phase,
         "model_method_timing": model_timer.summary(),

@@ -33,7 +33,7 @@ def build_cases():
         {
             "name": "current",
             "flags": {
-                "use_gru_tau": 1,
+                "use_gru_lambda": 1,
                 "use_dist_penalty": 1,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 1,
@@ -43,7 +43,7 @@ def build_cases():
         {
             "name": "no_dist",
             "flags": {
-                "use_gru_tau": 1,
+                "use_gru_lambda": 1,
                 "use_dist_penalty": 0,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 1,
@@ -53,7 +53,7 @@ def build_cases():
         {
             "name": "no_gru_no_dist",
             "flags": {
-                "use_gru_tau": 0,
+                "use_gru_lambda": 0,
                 "use_dist_penalty": 0,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 1,
@@ -63,7 +63,7 @@ def build_cases():
         {
             "name": "transr_dist",
             "flags": {
-                "use_gru_tau": 1,
+                "use_gru_lambda": 1,
                 "use_dist_penalty": 1,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 0,

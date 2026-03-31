@@ -44,17 +44,11 @@ def parse_t_akdn_args():
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
     parser.add_argument('--tau', type=float, default=1.0,
-                        help='Temperature parameter for attention softmax. Used as fixed value when --use_gru_tau=0.')
-    parser.add_argument('--tau_min', type=float, default=0.1,
-                        help='Lower bound for GRU-generated attention temperature.')
-    parser.add_argument('--tau_max', type=float, default=10.0,
-                        help='Upper bound for GRU-generated attention temperature.')
-    parser.add_argument('--tau_hidden_dim', type=int, default=64,
-                        help='Hidden size of the GRU used to generate layer-wise tau.')
+                        help='Fixed temperature parameter for attention softmax.')
 
     # --- Ablation toggle flags (REQUIRED) ---
-    parser.add_argument('--use_gru_tau', type=int, required=True, choices=[0, 1],
-                        help='1: GRU-based dynamic tau per layer, 0: fixed tau value.')
+    parser.add_argument('--use_gru_lambda', type=int, default=0, choices=[0, 1],
+                        help='1: GRU-based dynamic lambda per layer, 0: use external/fixed lambda schedule.')
     parser.add_argument('--use_dist_penalty', type=int, required=True, choices=[0, 1],
                         help='1: add lambda*normalized(dist) to attention logit, 0: semantic score only.')
     parser.add_argument('--use_neighbor_zscore', type=int, required=True, choices=[0, 1],
@@ -70,9 +64,15 @@ def parse_t_akdn_args():
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
     parser.add_argument('--lambda_init', type=float, default=0.0,
-                        help='Phase 1 lambda value (warmup, sem only).')
+                        help='Initial lambda value for schedule mode and GRU bias initialization.')
     parser.add_argument('--lambda_final', type=float, default=0.5,
                         help='Phase 2-3 lambda target value (saturation).')
+    parser.add_argument('--lambda_min', type=float, default=0.0,
+                        help='Lower bound for GRU-generated lambda.')
+    parser.add_argument('--lambda_max', type=float, default=1.0,
+                        help='Upper bound for GRU-generated lambda.')
+    parser.add_argument('--lambda_hidden_dim', type=int, default=64,
+                        help='Hidden size of the GRU used to generate layer-wise lambda.')
     parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
                         help='Phase 1: epochs with lambda=init (no dist penalty).')
     parser.add_argument('--lambda_anneal_epochs', type=int, default=400,

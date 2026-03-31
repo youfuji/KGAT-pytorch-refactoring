@@ -60,10 +60,10 @@ def evaluate(model, dataloader, Ks, device):
     return cf_scores, metrics_dict
 
 
-def format_tau_records(tau_records):
-    if not tau_records:
+def format_lambda_records(lambda_records):
+    if not lambda_records:
         return '[]'
-    return '[' + ', '.join('{:.4f}'.format(tau) for tau in tau_records) + ']'
+    return '[' + ', '.join('{:.4f}'.format(lam) for lam in lambda_records) + ']'
 
 
 def train(args):
@@ -126,7 +126,7 @@ def train(args):
         model.train()
 
         # Lambda setting (only when dist penalty is enabled)
-        if args.use_dist_penalty:
+        if args.use_dist_penalty and not args.use_gru_lambda:
             if args.use_lambda_annealing:
                 # 3-phase annealing: warmup → linear anneal → saturation
                 if epoch <= args.lambda_warmup_epochs:
@@ -140,6 +140,8 @@ def train(args):
                 # Fixed lambda (uses --lambda_final)
                 lam_val = args.lambda_final
             model.set_lambda(lam_val)
+        elif args.use_dist_penalty:
+            lam_val = None
         else:
             lam_val = 0.0
 
@@ -164,12 +166,18 @@ def train(args):
             optimizer.step()
             optimizer.zero_grad()
             total_loss += batch_loss.item()
-            tau_log = format_tau_records(model.tau_records)
+            lambda_log = format_lambda_records(model.lambda_records)
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Lambda {:.4f} | Tau {}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, lam_val, tau_log))
-        
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Lambda {:.4f} | Tau {}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, lam_val, format_tau_records(model.tau_records)))
+                if lam_val is None:
+                    logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, model.tau, lambda_log))
+                else:
+                    logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, model.tau, lam_val))
+
+        if lam_val is None:
+            logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, model.tau, format_lambda_records(model.lambda_records)))
+        else:
+            logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, model.tau, lam_val))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate
