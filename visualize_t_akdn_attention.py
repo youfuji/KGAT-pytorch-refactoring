@@ -44,6 +44,11 @@ def parse_attention_args():
         # save_dir is auto-numbered; override to use the specified log_id
         base_dir = os.path.dirname(base_args.save_dir.rstrip('/'))
         base_args.save_dir = os.path.join(base_dir, 'log{:d}/'.format(local_args.log_id))
+    elif base_args.pretrain_model_path:
+        # For visualization, default to the model directory to avoid creating a new auto-numbered log dir.
+        model_dir = os.path.dirname(base_args.pretrain_model_path)
+        if model_dir:
+            base_args.save_dir = model_dir
 
     return base_args, local_args
 
