@@ -31,43 +31,68 @@ def parse_args():
 def build_cases():
     return [
         {
-            "name": "current",
+            "name": "t_akdn_full",
             "flags": {
-                "use_gru_lambda": 1,
+                "use_transr_attention": 1,
+                "use_tau_softmax": 1,
                 "use_dist_penalty": 1,
+                "use_glu_lambda": 1,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 1,
-                "use_lambda_annealing": 1,
+            },
+        },
+        {
+            "name": "akdn_compat_attention",
+            "flags": {
+                "use_dist_penalty": 0,
+                "use_glu_lambda": 0,
+                "use_transr_attention": 0,
+                "use_tau_softmax": 0,
+                "use_neighbor_zscore": 0,
+                "use_concat_dist": 0,
             },
         },
         {
             "name": "no_dist",
             "flags": {
-                "use_gru_lambda": 1,
+                "use_transr_attention": 1,
+                "use_tau_softmax": 1,
                 "use_dist_penalty": 0,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 1,
-                "use_lambda_annealing": 1,
             },
         },
         {
-            "name": "no_gru_no_dist",
+            "name": "no_glu_lambda",
             "flags": {
-                "use_gru_lambda": 0,
-                "use_dist_penalty": 0,
+                "use_transr_attention": 1,
+                "use_tau_softmax": 1,
+                "use_dist_penalty": 1,
+                "use_glu_lambda": 0,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 1,
-                "use_lambda_annealing": 1,
+            },
+        },
+        {
+            "name": "global_zscore",
+            "flags": {
+                "use_transr_attention": 1,
+                "use_tau_softmax": 1,
+                "use_dist_penalty": 1,
+                "use_glu_lambda": 1,
+                "use_neighbor_zscore": 0,
+                "use_concat_dist": 1,
             },
         },
         {
             "name": "transr_dist",
             "flags": {
-                "use_gru_lambda": 1,
+                "use_transr_attention": 1,
+                "use_tau_softmax": 1,
                 "use_dist_penalty": 1,
+                "use_glu_lambda": 1,
                 "use_neighbor_zscore": 1,
                 "use_concat_dist": 0,
-                "use_lambda_annealing": 1,
             },
         },
     ]

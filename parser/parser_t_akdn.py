@@ -47,36 +47,39 @@ def parse_t_akdn_args():
                         help='Fixed temperature parameter for attention softmax.')
 
     # --- Ablation toggle flags (REQUIRED) ---
-    parser.add_argument('--use_gru_lambda', type=int, default=0, choices=[0, 1],
-                        help='1: GRU-based dynamic lambda per layer, 0: use external/fixed lambda schedule.')
+        # 1ならTransRベースの意味的注意機構を使い、0ならAKDN互換のrelation-aware注意機構を使う。
+    parser.add_argument('--use_transr_attention', type=int, default=1, choices=[0, 1],
+                        help='1: use TransR-based semantic attention, 0: use AKDN-compatible relation-aware attention.')
+        # 1ならtauでスケーリングしたsoftmaxを使い、0なら通常のsoftmaxを使う（tauは無視される）。
+    parser.add_argument('--use_tau_softmax', type=int, default=1, choices=[0, 1],
+                        help='1: apply tau-scaled softmax, 0: use standard softmax (tau ignored).')
+        # 1なら注意logitに距離ペナルティ分岐を加え、0なら意味スコアのみで計算する。
     parser.add_argument('--use_dist_penalty', type=int, required=True, choices=[0, 1],
-                        help='1: add lambda*normalized(dist) to attention logit, 0: semantic score only.')
+                        help='1: add distance branch to attention logit, 0: semantic score only.')
+        # 1なら距離係数にedge-wiseなGLU由来lambdaを使い、0なら固定係数1を使う（dist_penalty有効時のみ意味がある）。
+    parser.add_argument('--use_glu_lambda', type=int, default=1, choices=[0, 1],
+                        help='1: use edge-wise GLU lambda for dist coefficient, 0: use fixed coefficient 1. '
+                             'Requires --use_dist_penalty=1 to have any effect.')
+        # 1なら近傍ごとのZ-score正規化、0ならグローバルなZ-score正規化を使う。
     parser.add_argument('--use_neighbor_zscore', type=int, required=True, choices=[0, 1],
                         help='1: neighborhood-wise Z-score normalization, 0: global Z-score normalization.')
+        # 1なら結合ベースの距離スコア、0なら負の距離を使う（TransR注意を使わない場合はAKDN埋め込み空間で距離計算）。
     parser.add_argument('--use_concat_dist', type=int, required=True, choices=[0, 1],
-                        help='1: use concatenation-based dist score, 0: use negative TransR distance.')
-    parser.add_argument('--use_lambda_annealing', type=int, required=True, choices=[0, 1],
-                        help='1: 3-phase lambda annealing, 0: fixed lambda (uses --lambda_final value).')
+                        help='1: use concatenation-based dist score, 0: use negative distance. '
+                             'When --use_transr_attention=0, the distance is computed in AKDN embedding space.')
+        # 注意計算を分割してOOMを回避するためのチャンクサイズ。0は分割なし。
     parser.add_argument('--att_chunk_size', type=int, default=0,
                         help='Chunk size for attention computation to prevent OOM. 0 = no chunking (default). '
                              'Recommended: 262144 for Yelp2018.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
-    parser.add_argument('--lambda_init', type=float, default=0.0,
-                        help='Initial lambda value for schedule mode and GRU bias initialization.')
-    parser.add_argument('--lambda_final', type=float, default=0.5,
-                        help='Phase 2-3 lambda target value (saturation).')
     parser.add_argument('--lambda_min', type=float, default=0.0,
-                        help='Lower bound for GRU-generated lambda.')
+                        help='Lower bound for GLU-generated edge-wise lambda.')
     parser.add_argument('--lambda_max', type=float, default=1.0,
-                        help='Upper bound for GRU-generated lambda.')
-    parser.add_argument('--lambda_hidden_dim', type=int, default=64,
-                        help='Hidden size of the GRU used to generate layer-wise lambda.')
-    parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
-                        help='Phase 1: epochs with lambda=init (no dist penalty).')
-    parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
-                        help='Phase 2: epochs to linearly anneal lambda from init to final.')
+                        help='Upper bound for GLU-generated edge-wise lambda.')
+    parser.add_argument('--lambda_glu_hidden_dim', type=int, default=64,
+                        help='Hidden size of the GLU MLP used to generate edge-wise lambda.')
 
     # --- Attention Diagnostics ---
     parser.add_argument('--attn_diag_threshold', type=float, default=0.35,
