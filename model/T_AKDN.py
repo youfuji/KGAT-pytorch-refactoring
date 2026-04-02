@@ -232,8 +232,8 @@ class T_AKDN(nn.Module):
         std = values.std(unbiased=False).clamp(min=1e-8)
         return (values - mean) / std
 
-    def _compute_edge_lambda(self, sem, dist):
-        glu_input = torch.stack([sem, dist], dim=-1)
+    def _compute_edge_lambda(self, sem_norm, dist_norm):
+        glu_input = torch.stack([sem_norm, dist_norm], dim=-1)
         hidden = self.lambda_glu(self.lambda_glu_in(glu_input))
         lambda_logits = self.lambda_glu_out(hidden).squeeze(-1)
         return self.lambda_min + (self.lambda_max - self.lambda_min) * torch.sigmoid(lambda_logits)
@@ -359,13 +359,16 @@ class T_AKDN(nn.Module):
             attention_values = sem
         else:
             if self.use_dist_penalty:
+                sem_norm = self._score_norm_fn(sem)
+                dist_norm = self._score_norm_fn(dist)
                 if self.use_glu_lambda:
-                    lambda_edge = self._compute_edge_lambda(sem, dist)
+                    lambda_edge = self._compute_edge_lambda(sem_norm, dist_norm)
                 else:
                     lambda_edge = torch.ones_like(sem)
+                attention_values = sem_norm + lambda_edge * dist_norm
             else:
                 lambda_edge = None
-            sem_norm, dist_norm, attention_values = self._attention_fusion_fn(sem, dist, lambda_edge)
+                sem_norm, dist_norm, attention_values = self._attention_fusion_fn(sem, dist, lambda_edge)
 
         # Edge-level Softmax with fixed temperature tau
         alpha = self._edge_softmax(attention_values, tau=tau)  # [E]
