@@ -97,6 +97,9 @@ def build_item_edge_dataframe(record, item_mask):
         'alpha': record['alpha'][item_mask].numpy(),
     }
 
+    if 'lambda' in record:
+        columns['lambda'] = record['lambda'][item_mask].numpy()
+
     sem_variant_key = choose_existing_key(record, ['sem_tilde', 'sem_norm'])
     if sem_variant_key is not None:
         columns[sem_variant_key] = record[sem_variant_key][item_mask].numpy()
@@ -174,7 +177,7 @@ def plot_item_edges(record, item_id, top_k, save_path):
     labels = ['t{}|r{}'.format(int(t), int(r)) for t, r in zip(df['tail'], df['relation'])]
     x = np.arange(len(df))
     value_columns = [
-        key for key in ['sem', 'sem_tilde', 'sem_norm', 'dist', 'd_tilde_neg', 'dist_norm', 'alpha']
+        key for key in ['sem', 'sem_tilde', 'sem_norm', 'dist', 'd_tilde_neg', 'dist_norm', 'lambda', 'alpha']
         if key in df.columns
     ]
     width = 0.8 / max(1, len(value_columns))
@@ -186,6 +189,7 @@ def plot_item_edges(record, item_id, top_k, save_path):
         'dist': 'tab:orange',
         'd_tilde_neg': 'tab:green',
         'dist_norm': 'tab:green',
+        'lambda': 'tab:brown',
         'alpha': 'tab:red',
     }
 
@@ -213,6 +217,9 @@ def export_layer_tables(record, save_dir, top_k):
         'dist': record['dist'].numpy(),
         'alpha': record['alpha'].numpy(),
     }
+
+    if 'lambda' in record:
+        layer_dict['lambda'] = record['lambda'].numpy()
 
     sem_variant_key = choose_existing_key(record, ['sem_tilde', 'sem_norm'])
     if sem_variant_key is not None:
@@ -335,6 +342,7 @@ def main():
         'dist': 'tab:orange',
         'd_tilde_neg': 'tab:green',
         'dist_norm': 'tab:green',
+        'lambda': 'tab:brown',
         'alpha': 'tab:red',
     }
 
