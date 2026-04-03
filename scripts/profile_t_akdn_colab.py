@@ -48,7 +48,8 @@ def parse_args():
     parser.add_argument("--use_tau_softmax", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_dist_penalty", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_glu_lambda", type=int, default=1, choices=[0, 1])
-    parser.add_argument("--use_neighbor_zscore", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--score_norm_mode", type=str, default="neighbor_zscore",
+                        choices=["neighbor_zscore", "global_zscore", "global_minmax"])
     parser.add_argument("--use_concat_dist", type=int, default=1, choices=[0, 1])
     parser.add_argument("--att_chunk_size", type=int, default=0)
     parser.add_argument("--lambda_min", type=float, default=0.0)
@@ -151,6 +152,7 @@ def attach_model_profiling(model, timer_store, device):
         "_edge_softmax",
         "_neighbor_zscore",
         "_global_zscore",
+        "_global_minmax",
         "_kg_aggregation_full",
         "_kg_aggregation_chunked",
         "_ig_aggregation",
@@ -304,7 +306,7 @@ def profile_train_loop(args):
             "use_tau_softmax": args.use_tau_softmax,
             "use_dist_penalty": args.use_dist_penalty,
             "use_glu_lambda": args.use_glu_lambda,
-            "use_neighbor_zscore": args.use_neighbor_zscore,
+            "score_norm_mode": args.score_norm_mode,
             "use_concat_dist": args.use_concat_dist,
             "lambda_glu_hidden_dim": args.lambda_glu_hidden_dim,
             "edge_dropout_rate": args.edge_dropout_rate,

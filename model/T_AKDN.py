@@ -51,7 +51,7 @@ class T_AKDN(nn.Module):
         self.use_tau_softmax = bool(getattr(args, 'use_tau_softmax', 1))
         self.use_dist_penalty = bool(getattr(args, 'use_dist_penalty', 1))
         self.use_glu_lambda = bool(getattr(args, 'use_glu_lambda', 1))
-        self.use_neighbor_zscore = bool(getattr(args, 'use_neighbor_zscore', 1))
+        self.score_norm_mode = str(getattr(args, 'score_norm_mode', 'neighbor_zscore'))
         self.use_concat_dist = bool(getattr(args, 'use_concat_dist', 1))
 
         # Entity + User Embedding (R^d)
@@ -140,7 +140,7 @@ class T_AKDN(nn.Module):
         
         # Ablation Control
         self.gate_control = 'normal'  # 'normal', 'kg_only', 'ig_only'
-        self._score_norm_fn = self._neighbor_zscore if self.use_neighbor_zscore else self._global_zscore
+        self._score_norm_fn = self._resolve_score_norm_fn(self.score_norm_mode)
         self._dist_fn = self._compute_concat_dist if self.use_concat_dist else self._compute_transr_dist
         self._attention_fusion_fn = (
             self._fuse_attention_with_dist if self.use_dist_penalty else self._fuse_attention_sem_only
@@ -196,6 +196,16 @@ class T_AKDN(nn.Module):
         alpha = exp_logits / (sum_exp[self.h_list] + 1e-16)
         return alpha
 
+    def _resolve_score_norm_fn(self, mode):
+        norm_fns = {
+            'neighbor_zscore': self._neighbor_zscore,
+            'global_zscore': self._global_zscore,
+            'global_minmax': self._global_minmax,
+        }
+        if mode not in norm_fns:
+            raise ValueError('Unsupported score_norm_mode: {}'.format(mode))
+        return norm_fns[mode]
+
     def _neighbor_zscore(self, values):
         """
         Z-score normalize edge values within each center node neighborhood.
@@ -221,7 +231,7 @@ class T_AKDN(nn.Module):
 
     def _global_zscore(self, values):
         """
-        Globally standardize edge-wise scores.
+        Globally z-score edge-wise scores.
 
         Args:
             values: [E] edge-wise values
@@ -231,6 +241,20 @@ class T_AKDN(nn.Module):
         mean = values.mean()
         std = values.std(unbiased=False).clamp(min=1e-8)
         return (values - mean) / std
+
+    def _global_minmax(self, values):
+        """
+        Min-max scale edge-wise scores across all edges in the current forward pass.
+
+        Args:
+            values: [E] edge-wise values
+        Returns:
+            [E] values scaled to [0, 1]
+        """
+        min_value = values.min()
+        max_value = values.max()
+        scale = (max_value - min_value).clamp(min=1e-8)
+        return (values - min_value) / scale
 
     def _compute_edge_lambda(self, sem_norm, dist_norm):
         glu_input = torch.stack([sem_norm, dist_norm], dim=-1)
@@ -265,7 +289,7 @@ class T_AKDN(nn.Module):
     def _compute_local_scores_transr(self, e_entities_curr, h_idx, t_idx, r_idx):
         """
         エッジのサブセットに対して sem と dist を計算する（ローカル演算のみ）。
-        Z-score / softmax は全エッジ結合後に呼び出し側で行う。
+        Normalization / softmax は全エッジ結合後に呼び出し側で行う。
 
         Returns:
             sem:  [len(h_idx)] semantic scores
@@ -342,8 +366,8 @@ class T_AKDN(nn.Module):
           3. s_sem  = LeakyReLU( e_r^T W_k [e_{v,r} || e_{i,r}] )
           4. s_dist = LeakyReLU(W_dist [e_{i,r} || e_r || e_{v,r}] + b)
              or - (1/k) ||e_{i,r} + e_r - e_{v,r}||^2
-          5. sem_norm  = standardized(s_sem)
-          6. dist_norm = standardized(s_dist)
+          5. sem_norm  = normalize(s_sem)
+          6. dist_norm = normalize(s_dist)
           7. pi = sem_norm + λ * dist_norm
         
         Args:

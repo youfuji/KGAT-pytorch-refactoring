@@ -60,9 +60,11 @@ def parse_t_akdn_args():
     parser.add_argument('--use_glu_lambda', type=int, default=1, choices=[0, 1],
                         help='1: use edge-wise GLU lambda for dist coefficient, 0: use fixed coefficient 1. '
                              'Requires --use_dist_penalty=1 to have any effect.')
-        # 1なら近傍ごとのZ-score正規化、0ならグローバルなZ-score正規化を使う。
-    parser.add_argument('--use_neighbor_zscore', type=int, required=True, choices=[0, 1],
-                        help='1: neighborhood-wise Z-score normalization, 0: global Z-score normalization.')
+        # sem/dist 正規化方式を切り替える。
+    parser.add_argument('--score_norm_mode', type=str, required=True,
+                        choices=['neighbor_zscore', 'global_zscore', 'global_minmax'],
+                        help='Normalization for sem/dist before GLU and attention fusion. '
+                             'global_minmax computes min/max from all edge-wise raw scores in each forward pass.')
         # 1なら結合ベースの距離スコア、0なら負の距離を使う（TransR注意を使わない場合はAKDN埋め込み空間で距離計算）。
     parser.add_argument('--use_concat_dist', type=int, required=True, choices=[0, 1],
                         help='1: use concatenation-based dist score, 0: use negative distance. '
