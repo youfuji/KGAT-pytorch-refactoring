@@ -243,16 +243,18 @@ class T_AKDN(nn.Module):
 
     def _global_zscore(self, values):
         """
-        Globally z-score edge-wise scores.
+        Globally z-score edge-wise scores, then shift them upward so the
+        minimum value becomes 0.
 
         Args:
             values: [E] edge-wise values
         Returns:
-            [E] globally z-scored values
+            [E] globally z-scored values shifted to be non-negative
         """
         mean = values.mean()
         std = values.std(unbiased=False).clamp(min=1e-8)
-        return (values - mean) / std
+        zscore = (values - mean) / std
+        return zscore - zscore.min()
 
     def _global_minmax(self, values):
         """
