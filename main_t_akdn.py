@@ -76,6 +76,22 @@ def get_effective_tau(model, args):
     return model.tau if args.use_tau_softmax else 1.0
 
 
+def get_scheduled_lambda(args, epoch):
+    if args.lambda_mode == 'glu':
+        return None
+    if args.lambda_mode == 'fixed':
+        return args.lambda_final
+    if epoch <= args.lambda_warmup_epochs:
+        return args.lambda_init
+
+    anneal_progress = epoch - args.lambda_warmup_epochs
+    if anneal_progress >= args.lambda_anneal_epochs:
+        return args.lambda_final
+
+    ratio = anneal_progress / max(args.lambda_anneal_epochs, 1)
+    return args.lambda_init + ratio * (args.lambda_final - args.lambda_init)
+
+
 def train(args):
     # seed
     random.seed(args.seed)
@@ -135,6 +151,11 @@ def train(args):
         time0 = time()
         model.train()
 
+        scheduled_lambda = None
+        if args.use_dist_penalty and args.lambda_mode != 'glu':
+            scheduled_lambda = get_scheduled_lambda(args, epoch)
+            model.set_lambda(scheduled_lambda)
+
         time_cf = time()
         total_loss = 0
         n_batch = data.n_cf_train // data.cf_batch_size + 1
@@ -160,9 +181,15 @@ def train(args):
             tau_log = get_effective_tau(model, args)
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, tau_log, lambda_log))
+                if scheduled_lambda is None:
+                    logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, tau_log, lambda_log))
+                else:
+                    logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {:.4f} | Layer Lambda {}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, tau_log, scheduled_lambda, lambda_log))
 
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, get_effective_tau(model, args), format_lambda_log(model, args)))
+        if scheduled_lambda is None:
+            logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, get_effective_tau(model, args), format_lambda_log(model, args)))
+        else:
+            logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | Tau {:.4f} | Lambda {:.4f} | Layer Lambda {}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, get_effective_tau(model, args), scheduled_lambda, format_lambda_log(model, args)))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # Evaluate

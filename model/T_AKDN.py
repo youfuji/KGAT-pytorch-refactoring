@@ -42,6 +42,9 @@ class T_AKDN(nn.Module):
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
         self.tau = float(args.tau)
+        self.lambda_mode = str(getattr(args, 'lambda_mode', 'glu'))
+        self.lambda_init = float(getattr(args, 'lambda_init', 0.0))
+        self.lambda_final = float(getattr(args, 'lambda_final', 1.0))
         self.lambda_min = float(getattr(args, 'lambda_min', 0.0))
         self.lambda_max = float(getattr(args, 'lambda_max', 1.0))
         self.lambda_glu_hidden_dim = int(getattr(args, 'lambda_glu_hidden_dim', self.embed_dim))
@@ -50,9 +53,15 @@ class T_AKDN(nn.Module):
         self.use_transr_attention = bool(getattr(args, 'use_transr_attention', 1))
         self.use_tau_softmax = bool(getattr(args, 'use_tau_softmax', 1))
         self.use_dist_penalty = bool(getattr(args, 'use_dist_penalty', 1))
-        self.use_glu_lambda = bool(getattr(args, 'use_glu_lambda', 1))
         self.score_norm_mode = str(getattr(args, 'score_norm_mode', 'neighbor_zscore'))
         self.use_concat_dist = bool(getattr(args, 'use_concat_dist', 1))
+        self.use_glu_lambda = self.use_dist_penalty and (self.lambda_mode == 'glu')
+
+        if self.lambda_mode not in {'anneal', 'glu', 'fixed'}:
+            raise ValueError('Unsupported lambda_mode: {}'.format(self.lambda_mode))
+
+        # Scalar lambda used by anneal/fixed modes.
+        self.register_buffer('lambda_val', torch.tensor([self.lambda_init], dtype=torch.float))
 
         # Entity + User Embedding (R^d)
         self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.embed_dim)
@@ -151,6 +160,9 @@ class T_AKDN(nn.Module):
         self._kg_aggregation_fn = (
             self._kg_aggregation_chunked if self.att_chunk_size > 0 else self._kg_aggregation_full
         )
+
+    def set_lambda(self, value):
+        self.lambda_val.fill_(float(value))
 
     def set_kg_structure(self, h_list, t_list, r_list, relations):
         """
@@ -262,6 +274,9 @@ class T_AKDN(nn.Module):
         lambda_logits = self.lambda_glu_out(hidden).squeeze(-1)
         return self.lambda_min + (self.lambda_max - self.lambda_min) * torch.sigmoid(lambda_logits)
 
+    def _resolve_scalar_lambda(self):
+        return self.lambda_val.squeeze()
+
     def _compute_concat_dist(self, e_ir, e_r, e_vr):
         dist_input = torch.cat([e_ir, e_r, e_vr], dim=-1)
         return self.leakyrelu(self.W_dist(dist_input).squeeze(-1))
@@ -283,7 +298,8 @@ class T_AKDN(nn.Module):
     def _fuse_attention_with_dist(self, sem, dist, lambda_edge=None):
         sem_norm = self._score_norm_fn(sem)
         dist_norm = self._score_norm_fn(dist)
-        attention_values = sem_norm + lambda_edge * dist_norm
+        lambda_term = lambda_edge if lambda_edge is not None else self._resolve_scalar_lambda()
+        attention_values = sem_norm + lambda_term * dist_norm
         return sem_norm, dist_norm, attention_values
 
     def _compute_local_scores_transr(self, e_entities_curr, h_idx, t_idx, r_idx):
@@ -388,8 +404,8 @@ class T_AKDN(nn.Module):
                 if self.use_glu_lambda:
                     lambda_edge = self._compute_edge_lambda(sem_norm, dist_norm)
                 else:
-                    lambda_edge = torch.ones_like(sem)
-                attention_values = sem_norm + lambda_edge * dist_norm
+                    lambda_edge = None
+                attention_values = sem_norm + (lambda_edge if lambda_edge is not None else self._resolve_scalar_lambda()) * dist_norm
             else:
                 lambda_edge = None
                 sem_norm, dist_norm, attention_values = self._attention_fusion_fn(sem, dist, lambda_edge)
@@ -422,7 +438,13 @@ class T_AKDN(nn.Module):
                     'alpha': alpha[item_edge_mask].detach().cpu(),
                 }
                 if self.use_dist_penalty:
-                    record['lambda'] = lambda_edge[item_edge_mask].detach().cpu()
+                    if lambda_edge is None:
+                        record['lambda'] = torch.full_like(
+                            sem[item_edge_mask].detach().cpu(),
+                            float(self._resolve_scalar_lambda().detach().cpu()),
+                        )
+                    else:
+                        record['lambda'] = lambda_edge[item_edge_mask].detach().cpu()
                     record['dist_norm'] = dist_norm[item_edge_mask].detach().cpu()
             self.attention_records.append(record)
 
@@ -552,7 +574,7 @@ class T_AKDN(nn.Module):
             # KG Attention + Aggregation + Fusion
             # 最終層でもKG側を計算し、fused item表現に反映する。
             alpha, lambda_edge = self._compute_kg_attention(e_entities_curr)
-            lambda_mean = lambda_edge.mean() if lambda_edge is not None else e_entities_curr.new_tensor(0.0)
+            lambda_mean = lambda_edge.mean() if lambda_edge is not None else self._resolve_scalar_lambda().to(e_entities_curr.device)
             self.lambda_records.append(float(lambda_mean.detach().cpu()))
 
             # 1. KG Aggregation (Eq. 1)

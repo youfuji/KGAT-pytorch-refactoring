@@ -47,11 +47,16 @@ def parse_args():
     parser.add_argument("--use_transr_attention", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_tau_softmax", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_dist_penalty", type=int, default=1, choices=[0, 1])
-    parser.add_argument("--use_glu_lambda", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--lambda_mode", type=str, default="glu",
+                        choices=["anneal", "glu", "fixed"])
     parser.add_argument("--score_norm_mode", type=str, default="neighbor_zscore",
                         choices=["neighbor_zscore", "global_zscore", "global_minmax"])
     parser.add_argument("--use_concat_dist", type=int, default=1, choices=[0, 1])
     parser.add_argument("--att_chunk_size", type=int, default=0)
+    parser.add_argument("--lambda_init", type=float, default=0.0)
+    parser.add_argument("--lambda_final", type=float, default=1.0)
+    parser.add_argument("--lambda_warmup_epochs", type=int, default=100)
+    parser.add_argument("--lambda_anneal_epochs", type=int, default=400)
     parser.add_argument("--lambda_min", type=float, default=0.0)
     parser.add_argument("--lambda_max", type=float, default=1.0)
     parser.add_argument("--lambda_glu_hidden_dim", type=int, default=64)
@@ -194,6 +199,22 @@ def build_model(args, data, device):
     return model
 
 
+def get_scheduled_lambda(args, epoch):
+    if args.lambda_mode == "glu":
+        return None
+    if args.lambda_mode == "fixed":
+        return args.lambda_final
+    if epoch <= args.lambda_warmup_epochs:
+        return args.lambda_init
+
+    anneal_progress = epoch - args.lambda_warmup_epochs
+    if anneal_progress >= args.lambda_anneal_epochs:
+        return args.lambda_final
+
+    ratio = anneal_progress / max(args.lambda_anneal_epochs, 1)
+    return args.lambda_init + ratio * (args.lambda_final - args.lambda_init)
+
+
 def profile_train_loop(args):
     set_seed(args.seed)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -217,6 +238,9 @@ def profile_train_loop(args):
 
     for step in range(total_steps):
         summary = {"step": step}
+        epoch = step + 1
+        if args.use_dist_penalty and args.lambda_mode != "glu":
+            model.set_lambda(get_scheduled_lambda(args, epoch))
 
         t0 = time.perf_counter()
         cf_batch_user, cf_batch_pos_item, cf_batch_neg_item = data.generate_cf_batch(
@@ -305,9 +329,15 @@ def profile_train_loop(args):
             "use_transr_attention": args.use_transr_attention,
             "use_tau_softmax": args.use_tau_softmax,
             "use_dist_penalty": args.use_dist_penalty,
-            "use_glu_lambda": args.use_glu_lambda,
+            "lambda_mode": args.lambda_mode,
             "score_norm_mode": args.score_norm_mode,
             "use_concat_dist": args.use_concat_dist,
+            "lambda_init": args.lambda_init,
+            "lambda_final": args.lambda_final,
+            "lambda_warmup_epochs": args.lambda_warmup_epochs,
+            "lambda_anneal_epochs": args.lambda_anneal_epochs,
+            "lambda_min": args.lambda_min,
+            "lambda_max": args.lambda_max,
             "lambda_glu_hidden_dim": args.lambda_glu_hidden_dim,
             "edge_dropout_rate": args.edge_dropout_rate,
         },

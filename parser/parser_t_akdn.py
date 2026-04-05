@@ -56,11 +56,11 @@ def parse_t_akdn_args():
         # 1なら注意logitに距離ペナルティ分岐を加え、0なら意味スコアのみで計算する。
     parser.add_argument('--use_dist_penalty', type=int, required=True, choices=[0, 1],
                         help='1: add distance branch to attention logit, 0: semantic score only.')
-        # 1なら距離係数にedge-wiseなGLU由来lambdaを使い、0なら固定係数1を使う（dist_penalty有効時のみ意味がある）。
-    parser.add_argument('--use_glu_lambda', type=int, default=1, choices=[0, 1],
-                        help='1: use edge-wise GLU lambda for dist coefficient, 0: use fixed coefficient 1. '
-                             'Requires --use_dist_penalty=1 to have any effect.')
-        # sem/dist 正規化方式を切り替える。
+        # 距離係数lambdaの制御方式を切り替える。
+    parser.add_argument('--lambda_mode', type=str, default='glu', choices=['anneal', 'glu', 'fixed'],
+                        help='How to control the distance coefficient lambda when --use_dist_penalty=1. '
+                             'anneal: epoch-wise scalar schedule, glu: edge-wise GLU lambda, fixed: constant scalar lambda.')
+    # sem/dist 正規化方式を切り替える。
     parser.add_argument('--score_norm_mode', type=str, required=True,
                         choices=['neighbor_zscore', 'global_zscore', 'global_minmax'],
                         help='Normalization for sem/dist before GLU and attention fusion. '
@@ -76,6 +76,14 @@ def parse_t_akdn_args():
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
+    parser.add_argument('--lambda_init', type=float, default=0.0,
+                        help='Initial scalar lambda for anneal mode.')
+    parser.add_argument('--lambda_final', type=float, default=1.0,
+                        help='Final scalar lambda for anneal mode and the constant scalar lambda for fixed mode.')
+    parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
+                        help='Epochs to keep lambda at lambda_init before annealing.')
+    parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
+                        help='Epochs used for linear annealing from lambda_init to lambda_final.')
     parser.add_argument('--lambda_min', type=float, default=0.0,
                         help='Lower bound for GLU-generated edge-wise lambda.')
     parser.add_argument('--lambda_max', type=float, default=1.0,
