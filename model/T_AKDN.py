@@ -341,22 +341,30 @@ class T_AKDN(nn.Module):
             sem:  [len(h_idx)] semantic scores
             dist: [len(h_idx)] distance-like scores
         """
-        k = self.transr_dim
-        d = self.embed_dim
+        sem = torch.empty(h_idx.size(0), device=e_entities_curr.device, dtype=e_entities_curr.dtype)
+        dist = torch.empty_like(sem)
 
-        h_embed = F.normalize(e_entities_curr[h_idx], p=2, dim=-1, eps=1e-5)
-        t_embed = F.normalize(e_entities_curr[t_idx], p=2, dim=-1, eps=1e-5)
+        for relation_idx in torch.unique(r_idx, sorted=True).tolist():
+            relation_mask = (r_idx == relation_idx)
+            batch_h = h_idx[relation_mask]
+            batch_t = t_idx[relation_mask]
 
-        M = self.transr_proj(r_idx).view(-1, k, d)
-        e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)
-        e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)
-        e_r  = F.normalize(self.relation_embed_k(r_idx), p=2, dim=-1, eps=1e-5)
+            h_embed = F.normalize(e_entities_curr[batch_h], p=2, dim=-1, eps=1e-5)
+            t_embed = F.normalize(e_entities_curr[batch_t], p=2, dim=-1, eps=1e-5)
 
-        cat_embed = torch.cat([e_vr, e_ir], dim=-1)
-        q = self.W_k(cat_embed)
-        sem = torch.sum(q * e_r, dim=-1)
-        sem = self.leakyrelu(sem)
-        dist = self._dist_fn(e_ir, e_r, e_vr)
+            M, e_r = self._get_relation_transform(relation_idx)
+            e_r = e_r.unsqueeze(0).expand(batch_h.size(0), -1)
+
+            e_ir = torch.matmul(h_embed, M.transpose(0, 1))
+            e_vr = torch.matmul(t_embed, M.transpose(0, 1))
+
+            cat_embed = torch.cat([e_vr, e_ir], dim=-1)
+            q = self.W_k(cat_embed)
+            sem_batch = self.leakyrelu(torch.sum(q * e_r, dim=-1))
+            dist_batch = self._dist_fn(e_ir, e_r, e_vr)
+
+            sem[relation_mask] = sem_batch
+            dist[relation_mask] = dist_batch
 
         return sem, dist
 
