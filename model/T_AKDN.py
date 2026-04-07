@@ -19,7 +19,7 @@ class T_AKDN(nn.Module):
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
-                 ig_edge_index=None, ig_relation_ids=None, ig_edge_values=None,
+                 ig_adj_user_to_item=None, ig_adj_item_to_user=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):
 
         super(T_AKDN, self).__init__()
@@ -129,11 +129,14 @@ class T_AKDN(nn.Module):
             self.A_in = nn.Parameter(A_in)
             self.A_in.requires_grad = False
 
-        if ig_edge_index is None or ig_relation_ids is None or ig_edge_values is None:
-            raise ValueError('T_AKDN requires ig_edge_index, ig_relation_ids, and ig_edge_values.')
-        self.register_buffer('ig_edge_index', ig_edge_index)
-        self.register_buffer('ig_relation_ids', ig_relation_ids)
-        self.register_buffer('ig_edge_values', ig_edge_values)
+        if ig_adj_user_to_item is None or ig_adj_item_to_user is None:
+            raise ValueError('T_AKDN requires ig_adj_user_to_item and ig_adj_item_to_user.')
+        self.ig_adj_user_to_item = nn.Parameter(ig_adj_user_to_item)
+        self.ig_adj_user_to_item.requires_grad = False
+        self.ig_adj_item_to_user = nn.Parameter(ig_adj_item_to_user)
+        self.ig_adj_item_to_user.requires_grad = False
+        self.ig_relation_user_to_item = 0
+        self.ig_relation_item_to_user = 1
         
         # KG用隣接行列 (Attention付き) は _compute_kg_attention で動的に作成
         self.A_kg = None
@@ -172,6 +175,19 @@ class T_AKDN(nn.Module):
         M = self.transr_proj(r_idx).view(-1, self.transr_dim, self.embed_dim)
         projected = torch.bmm(M, embed.unsqueeze(-1)).squeeze(-1)
         return projected, M
+
+    def _get_relation_transform(self, relation_idx):
+        M = self.transr_proj.weight[relation_idx].view(self.transr_dim, self.embed_dim)
+        r_embed = F.normalize(self.relation_embed_k.weight[relation_idx], p=2, dim=-1, eps=1e-5)
+        return M, r_embed
+
+    def _ig_relation_aggregation(self, adj, src_embed, relation_idx):
+        M, r_embed = self._get_relation_transform(relation_idx)
+        src_embed = F.normalize(src_embed, p=2, dim=-1, eps=1e-5)
+        projected_src = torch.matmul(src_embed, M.transpose(0, 1))
+        aggregated = torch.sparse.mm(adj, projected_src)
+        aggregated = aggregated + r_embed.unsqueeze(0)
+        return torch.matmul(aggregated, M)
 
     def set_lambda(self, value):
         self.lambda_val.fill_(float(value))
@@ -543,36 +559,24 @@ class T_AKDN(nn.Module):
         """
         IG Aggregation (Eq. 3 & Eq. 6)
         """
-        ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
-
-        h_idx = self.ig_edge_index[0]
-        t_idx = self.ig_edge_index[1]
-        r_idx = self.ig_relation_ids
-        edge_values = self.ig_edge_values
-
         if self.training and self.edge_dropout_rate > 0.0:
-            drop_mask = (torch.rand(edge_values.size(0), device=edge_values.device) >= self.edge_dropout_rate).float()
-            edge_values = edge_values * drop_mask / (1.0 - self.edge_dropout_rate)
+            adj_user_to_item = self._sparse_dropout(
+                self.ig_adj_user_to_item, self.edge_dropout_rate, self.ig_adj_user_to_item._nnz()
+            )
+            adj_item_to_user = self._sparse_dropout(
+                self.ig_adj_item_to_user, self.edge_dropout_rate, self.ig_adj_item_to_user._nnz()
+            )
+        else:
+            adj_user_to_item = self.ig_adj_user_to_item
+            adj_item_to_user = self.ig_adj_item_to_user
 
-        tail_embed = F.normalize(ig_input_ordered[t_idx], p=2, dim=-1, eps=1e-5)
-        e_tr, M = self._project_transr(tail_embed, r_idx)
-        e_r = F.normalize(self.relation_embed_k(r_idx), p=2, dim=-1, eps=1e-5)
-
-        message_k = e_tr + e_r
-        decoded_message = torch.bmm(M.transpose(1, 2), message_k.unsqueeze(-1)).squeeze(-1)
-        weighted = edge_values.unsqueeze(-1) * decoded_message
-
-        ig_output = torch.zeros(
-            self.n_entities + self.n_users,
-            self.embed_dim,
-            device=ig_input_ordered.device,
-            dtype=ig_input_ordered.dtype,
+        e_items_collab = self._ig_relation_aggregation(
+            adj_user_to_item, e_users_curr, self.ig_relation_user_to_item
         )
-        ig_output = ig_output.index_add(0, h_idx, weighted)
+        e_users_new = self._ig_relation_aggregation(
+            adj_item_to_user, e_items_dual, self.ig_relation_item_to_user
+        )
 
-        e_items_collab = ig_output[:self.n_entities]
-        e_users_new = ig_output[self.n_entities:]
-        
         return e_items_collab, e_users_new
 
     def get_embeddings(self):

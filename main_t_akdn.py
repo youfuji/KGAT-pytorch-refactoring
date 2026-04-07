@@ -119,9 +119,8 @@ def train(args):
     # construct model & optimizer
     model = T_AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, 
                    A_in=data.norm_adj_mat,
-                   ig_edge_index=data.ig_edge_index,
-                   ig_relation_ids=data.ig_relation_ids,
-                   ig_edge_values=data.ig_edge_values,
+                   ig_adj_user_to_item=data.norm_adj_user_to_item,
+                   ig_adj_item_to_user=data.norm_adj_item_to_user,
                    user_pre_embed=user_pre_embed, 
                    item_pre_embed=item_pre_embed,
                    edge_dropout_rate=args.edge_dropout_rate)
@@ -248,9 +247,8 @@ def predict(args):
         data.n_entities,
         data.n_relations,
         A_in=data.norm_adj_mat,
-        ig_edge_index=data.ig_edge_index,
-        ig_relation_ids=data.ig_relation_ids,
-        ig_edge_values=data.ig_edge_values,
+        ig_adj_user_to_item=data.norm_adj_user_to_item,
+        ig_adj_item_to_user=data.norm_adj_item_to_user,
     )
     model = load_model(model, args.pretrain_model_path)
     model.to(device)

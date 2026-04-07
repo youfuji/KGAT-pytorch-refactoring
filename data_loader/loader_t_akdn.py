@@ -84,40 +84,44 @@ class DataLoaderTAKDN(DataLoaderBase):
         return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
     def create_ig_adjacency(self):
-        rows = []
-        cols = []
+        user_rows = []
+        item_cols = []
 
         for u_id, items in self.train_user_dict.items():
-            rows.extend([u_id] * len(items))
-            cols.extend(items)
+            local_user_id = u_id - self.n_entities
+            user_rows.extend([local_user_id] * len(items))
+            item_cols.extend(items)
 
-        vals = [1.0] * len(rows)
+        user_rows = np.asarray(user_rows, dtype=np.int64)
+        item_cols = np.asarray(item_cols, dtype=np.int64)
+        vals = np.ones_like(user_rows, dtype=np.float32)
 
-        adj_mat = sp.coo_matrix(
-            (vals, (rows, cols)),
+        user_degree = np.bincount(user_rows, minlength=self.n_users).astype(np.float32)
+        item_degree = np.bincount(item_cols, minlength=self.n_entities).astype(np.float32)
+        norm_values = np.power(user_degree[user_rows] * item_degree[item_cols], -0.5)
+        norm_values[np.isinf(norm_values)] = 0.0
+
+        user_to_item = sp.coo_matrix(
+            (norm_values, (item_cols, user_rows)),
+            shape=(self.n_entities, self.n_users),
+        )
+        item_to_user = sp.coo_matrix(
+            (norm_values, (user_rows, item_cols)),
+            shape=(self.n_users, self.n_entities),
+        )
+
+        self.norm_adj_user_to_item = self.convert_coo2tensor(user_to_item)
+        self.norm_adj_item_to_user = self.convert_coo2tensor(item_to_user)
+
+        # Keep the original full bipartite adjacency for compatibility and debugging.
+        full_rows = np.concatenate([item_cols, user_rows + self.n_entities])
+        full_cols = np.concatenate([user_rows + self.n_entities, item_cols])
+        full_vals = np.concatenate([norm_values, norm_values])
+        full_adj = sp.coo_matrix(
+            (full_vals, (full_rows, full_cols)),
             shape=(self.n_users_entities, self.n_users_entities),
         )
-        adj_mat = adj_mat + adj_mat.T
-
-        rowsum = np.array(adj_mat.sum(axis=1))
-        d_inv_sqrt = np.power(rowsum, -0.5).flatten()
-        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.0
-        d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
-
-        norm_adj_mat = d_mat_inv_sqrt.dot(adj_mat).dot(d_mat_inv_sqrt).tocoo()
-        self.norm_adj_mat = self.convert_coo2tensor(norm_adj_mat)
-
-        ig_rows = norm_adj_mat.row.astype(np.int64)
-        ig_cols = norm_adj_mat.col.astype(np.int64)
-        ig_values = norm_adj_mat.data.astype(np.float32)
-
-        ig_relations = np.full_like(ig_rows, fill_value=self.IG_RELATION_ITEM_TO_USER)
-        user_to_item_mask = ig_rows >= self.n_entities
-        ig_relations[user_to_item_mask] = self.IG_RELATION_USER_TO_ITEM
-
-        self.ig_edge_index = torch.LongTensor(np.vstack((ig_rows, ig_cols)))
-        self.ig_relation_ids = torch.LongTensor(ig_relations)
-        self.ig_edge_values = torch.FloatTensor(ig_values)
+        self.norm_adj_mat = self.convert_coo2tensor(full_adj)
 
     def print_info(self, logging):
         logging.info('n_users:           %d' % self.n_users)
@@ -134,4 +138,5 @@ class DataLoaderTAKDN(DataLoaderBase):
         logging.info('n_cf_test:         %d' % self.n_cf_test)
 
         logging.info('n_kg_train:        %d' % self.n_kg_train)
-        logging.info('n_ig_edges:        %d' % self.ig_edge_values.numel())
+        logging.info('n_ig_user_item:    %d' % self.norm_adj_user_to_item._nnz())
+        logging.info('n_ig_item_user:    %d' % self.norm_adj_item_to_user._nnz())
