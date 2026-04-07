@@ -20,8 +20,8 @@ class DataLoaderTAKDN(DataLoaderBase):
 
         kg_data = self.load_kg(self.kg_file)
         self.construct_data(kg_data)
-        self.print_info(logging)
         self.create_ig_adjacency()
+        self.print_info(logging)
 
     def construct_data(self, kg_data):
         n_relations = max(kg_data['r']) + 1
