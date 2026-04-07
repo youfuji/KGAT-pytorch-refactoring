@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from data_loader.loader_akdn import DataLoaderAKDN
+from data_loader.loader_t_akdn import DataLoaderTAKDN
 from model.T_AKDN import T_AKDN
 from parser.parser_t_akdn import parse_t_akdn_args
 from utils.metrics import compute_attention_diagnostics_from_alpha
@@ -284,7 +284,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     logging.info('Loading data...')
-    data = DataLoaderAKDN(args, logging)
+    data = DataLoaderTAKDN(args, logging)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     if args.use_pretrain == 1:
@@ -301,6 +301,9 @@ def main():
         data.n_entities,
         data.n_relations,
         A_in=data.norm_adj_mat,
+        ig_edge_index=data.ig_edge_index,
+        ig_relation_ids=data.ig_relation_ids,
+        ig_edge_values=data.ig_edge_values,
         user_pre_embed=user_pre_embed,
         item_pre_embed=item_pre_embed,
         edge_dropout_rate=0.0,

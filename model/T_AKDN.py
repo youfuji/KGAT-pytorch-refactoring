@@ -19,6 +19,7 @@ class T_AKDN(nn.Module):
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
+                 ig_edge_index=None, ig_relation_ids=None, ig_edge_values=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):
 
         super(T_AKDN, self).__init__()
@@ -127,6 +128,12 @@ class T_AKDN(nn.Module):
         if A_in is not None:
             self.A_in = nn.Parameter(A_in)
             self.A_in.requires_grad = False
+
+        if ig_edge_index is None or ig_relation_ids is None or ig_edge_values is None:
+            raise ValueError('T_AKDN requires ig_edge_index, ig_relation_ids, and ig_edge_values.')
+        self.register_buffer('ig_edge_index', ig_edge_index)
+        self.register_buffer('ig_relation_ids', ig_relation_ids)
+        self.register_buffer('ig_edge_values', ig_edge_values)
         
         # KG用隣接行列 (Attention付き) は _compute_kg_attention で動的に作成
         self.A_kg = None
@@ -160,6 +167,11 @@ class T_AKDN(nn.Module):
         self._kg_aggregation_fn = (
             self._kg_aggregation_chunked if self.att_chunk_size > 0 else self._kg_aggregation_full
         )
+
+    def _project_transr(self, embed, r_idx):
+        M = self.transr_proj(r_idx).view(-1, self.transr_dim, self.embed_dim)
+        projected = torch.bmm(M, embed.unsqueeze(-1)).squeeze(-1)
+        return projected, M
 
     def set_lambda(self, value):
         self.lambda_val.fill_(float(value))
@@ -532,14 +544,32 @@ class T_AKDN(nn.Module):
         IG Aggregation (Eq. 3 & Eq. 6)
         """
         ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
-        
-        if self.training and self.edge_dropout_rate > 0.0:
-            A_in = self._sparse_dropout(self.A_in, self.edge_dropout_rate, self.A_in._nnz())
-        else:
-            A_in = self.A_in
 
-        ig_output = torch.sparse.mm(A_in, ig_input_ordered)
-        
+        h_idx = self.ig_edge_index[0]
+        t_idx = self.ig_edge_index[1]
+        r_idx = self.ig_relation_ids
+        edge_values = self.ig_edge_values
+
+        if self.training and self.edge_dropout_rate > 0.0:
+            drop_mask = (torch.rand(edge_values.size(0), device=edge_values.device) >= self.edge_dropout_rate).float()
+            edge_values = edge_values * drop_mask / (1.0 - self.edge_dropout_rate)
+
+        tail_embed = F.normalize(ig_input_ordered[t_idx], p=2, dim=-1, eps=1e-5)
+        e_tr, M = self._project_transr(tail_embed, r_idx)
+        e_r = F.normalize(self.relation_embed_k(r_idx), p=2, dim=-1, eps=1e-5)
+
+        message_k = e_tr + e_r
+        decoded_message = torch.bmm(M.transpose(1, 2), message_k.unsqueeze(-1)).squeeze(-1)
+        weighted = edge_values.unsqueeze(-1) * decoded_message
+
+        ig_output = torch.zeros(
+            self.n_entities + self.n_users,
+            self.embed_dim,
+            device=ig_input_ordered.device,
+            dtype=ig_input_ordered.dtype,
+        )
+        ig_output = ig_output.index_add(0, h_idx, weighted)
+
         e_items_collab = ig_output[:self.n_entities]
         e_users_new = ig_output[self.n_entities:]
         
