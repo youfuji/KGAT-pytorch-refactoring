@@ -44,23 +44,32 @@ def parse_t_akdn_args():
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension k.')
     parser.add_argument('--tau', type=float, default=1.0,
-                        help='Temperature parameter for attention softmax. Used as fixed value when --use_gru_tau=0.')
-    parser.add_argument('--tau_min', type=float, default=0.1,
-                        help='Lower bound for GRU-generated attention temperature.')
-    parser.add_argument('--tau_max', type=float, default=10.0,
-                        help='Upper bound for GRU-generated attention temperature.')
-    parser.add_argument('--tau_hidden_dim', type=int, default=64,
-                        help='Hidden size of the GRU used to generate layer-wise tau.')
+                        help='Fixed temperature parameter for attention softmax.')
 
     # --- Ablation toggle flags (REQUIRED) ---
-    parser.add_argument('--use_gru_tau', type=int, required=True, choices=[0, 1],
-                        help='1: GRU-based dynamic tau per layer, 0: fixed tau value.')
+        # 1ならTransRベースの意味的注意機構を使い、0ならAKDN互換のrelation-aware注意機構を使う。
+    parser.add_argument('--use_transr_attention', type=int, default=1, choices=[0, 1],
+                        help='1: use TransR-based semantic attention, 0: use AKDN-compatible relation-aware attention.')
+        # 1ならtauでスケーリングしたsoftmaxを使い、0なら通常のsoftmaxを使う（tauは無視される）。
+    parser.add_argument('--use_tau_softmax', type=int, default=1, choices=[0, 1],
+                        help='1: apply tau-scaled softmax, 0: use standard softmax (tau ignored).')
+        # 1なら注意logitに距離ペナルティ分岐を加え、0なら意味スコアのみで計算する。
     parser.add_argument('--use_dist_penalty', type=int, required=True, choices=[0, 1],
-                        help='1: add lambda*Z(-dist) to attention logit, 0: semantic score only.')
-    parser.add_argument('--use_neighbor_zscore', type=int, required=True, choices=[0, 1],
-                        help='1: Z-score normalize scores within neighborhoods, 0: use raw scores.')
-    parser.add_argument('--use_lambda_annealing', type=int, required=True, choices=[0, 1],
-                        help='1: 3-phase lambda annealing, 0: fixed lambda (uses --lambda_final value).')
+                        help='1: add distance branch to attention logit, 0: semantic score only.')
+        # 距離係数lambdaの制御方式を切り替える。
+    parser.add_argument('--lambda_mode', type=str, default='glu', choices=['anneal', 'glu', 'fixed'],
+                        help='How to control the distance coefficient lambda when --use_dist_penalty=1. '
+                             'anneal: epoch-wise scalar schedule, glu: edge-wise GLU lambda, fixed: constant scalar lambda.')
+    # sem/dist 正規化方式を切り替える。
+    parser.add_argument('--score_norm_mode', type=str, required=True,
+                        choices=['neighbor_zscore', 'global_zscore', 'global_minmax'],
+                        help='Normalization for sem/dist before GLU and attention fusion. '
+                             'global_minmax computes min/max from all edge-wise raw scores in each forward pass.')
+        # 1なら結合ベースの距離スコア、0なら負の距離を使う（TransR注意を使わない場合はAKDN埋め込み空間で距離計算）。
+    parser.add_argument('--use_concat_dist', type=int, required=True, choices=[0, 1],
+                        help='1: use concatenation-based dist score, 0: use negative distance. '
+                             'When --use_transr_attention=0, the distance is computed in AKDN embedding space.')
+        # 注意計算を分割してOOMを回避するためのチャンクサイズ。0は分割なし。
     parser.add_argument('--att_chunk_size', type=int, default=0,
                         help='Chunk size for attention computation to prevent OOM. 0 = no chunking (default). '
                              'Recommended: 262144 for Yelp2018.')
@@ -68,13 +77,19 @@ def parse_t_akdn_args():
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
     parser.add_argument('--lambda_init', type=float, default=0.0,
-                        help='Phase 1 lambda value (warmup, sem only).')
-    parser.add_argument('--lambda_final', type=float, default=0.5,
-                        help='Phase 2-3 lambda target value (saturation).')
+                        help='Initial scalar lambda for anneal mode.')
+    parser.add_argument('--lambda_final', type=float, default=1.0,
+                        help='Final scalar lambda for anneal mode and the constant scalar lambda for fixed mode.')
     parser.add_argument('--lambda_warmup_epochs', type=int, default=100,
-                        help='Phase 1: epochs with lambda=init (no dist penalty).')
+                        help='Epochs to keep lambda at lambda_init before annealing.')
     parser.add_argument('--lambda_anneal_epochs', type=int, default=400,
-                        help='Phase 2: epochs to linearly anneal lambda from init to final.')
+                        help='Epochs used for linear annealing from lambda_init to lambda_final.')
+    parser.add_argument('--lambda_min', type=float, default=0.0,
+                        help='Lower bound for GLU-generated edge-wise lambda.')
+    parser.add_argument('--lambda_max', type=float, default=1.0,
+                        help='Upper bound for GLU-generated edge-wise lambda.')
+    parser.add_argument('--lambda_glu_hidden_dim', type=int, default=64,
+                        help='Hidden size of the GLU MLP used to generate edge-wise lambda.')
 
     # --- Attention Diagnostics ---
     parser.add_argument('--attn_diag_threshold', type=float, default=0.35,
