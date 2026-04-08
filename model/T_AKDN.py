@@ -19,6 +19,7 @@ class T_AKDN(nn.Module):
     """
 
     def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
+                 ig_adj_user_to_item=None, ig_adj_item_to_user=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):
 
         super(T_AKDN, self).__init__()
@@ -127,6 +128,15 @@ class T_AKDN(nn.Module):
         if A_in is not None:
             self.A_in = nn.Parameter(A_in)
             self.A_in.requires_grad = False
+
+        if ig_adj_user_to_item is None or ig_adj_item_to_user is None:
+            raise ValueError('T_AKDN requires ig_adj_user_to_item and ig_adj_item_to_user.')
+        self.ig_adj_user_to_item = nn.Parameter(ig_adj_user_to_item)
+        self.ig_adj_user_to_item.requires_grad = False
+        self.ig_adj_item_to_user = nn.Parameter(ig_adj_item_to_user)
+        self.ig_adj_item_to_user.requires_grad = False
+        self.ig_relation_user_to_item = 0
+        self.ig_relation_item_to_user = 1
         
         # KG用隣接行列 (Attention付き) は _compute_kg_attention で動的に作成
         self.A_kg = None
@@ -160,6 +170,24 @@ class T_AKDN(nn.Module):
         self._kg_aggregation_fn = (
             self._kg_aggregation_chunked if self.att_chunk_size > 0 else self._kg_aggregation_full
         )
+
+    def _project_transr(self, embed, r_idx):
+        M = self.transr_proj(r_idx).view(-1, self.transr_dim, self.embed_dim)
+        projected = torch.bmm(M, embed.unsqueeze(-1)).squeeze(-1)
+        return projected, M
+
+    def _get_relation_transform(self, relation_idx):
+        M = self.transr_proj.weight[relation_idx].view(self.transr_dim, self.embed_dim)
+        r_embed = F.normalize(self.relation_embed_k.weight[relation_idx], p=2, dim=-1, eps=1e-5)
+        return M, r_embed
+
+    def _ig_relation_aggregation(self, adj, src_embed, relation_idx):
+        M, r_embed = self._get_relation_transform(relation_idx)
+        src_embed = F.normalize(src_embed, p=2, dim=-1, eps=1e-5)
+        projected_src = torch.matmul(src_embed, M.transpose(0, 1))
+        aggregated = torch.sparse.mm(adj, projected_src)
+        aggregated = aggregated + r_embed.unsqueeze(0)
+        return torch.matmul(aggregated, M)
 
     def set_lambda(self, value):
         self.lambda_val.fill_(float(value))
@@ -313,22 +341,30 @@ class T_AKDN(nn.Module):
             sem:  [len(h_idx)] semantic scores
             dist: [len(h_idx)] distance-like scores
         """
-        k = self.transr_dim
-        d = self.embed_dim
+        sem = torch.empty(h_idx.size(0), device=e_entities_curr.device, dtype=e_entities_curr.dtype)
+        dist = torch.empty_like(sem)
 
-        h_embed = F.normalize(e_entities_curr[h_idx], p=2, dim=-1, eps=1e-5)
-        t_embed = F.normalize(e_entities_curr[t_idx], p=2, dim=-1, eps=1e-5)
+        for relation_idx in torch.unique(r_idx, sorted=True).tolist():
+            relation_mask = (r_idx == relation_idx)
+            batch_h = h_idx[relation_mask]
+            batch_t = t_idx[relation_mask]
 
-        M = self.transr_proj(r_idx).view(-1, k, d)
-        e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)
-        e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)
-        e_r  = F.normalize(self.relation_embed_k(r_idx), p=2, dim=-1, eps=1e-5)
+            h_embed = F.normalize(e_entities_curr[batch_h], p=2, dim=-1, eps=1e-5)
+            t_embed = F.normalize(e_entities_curr[batch_t], p=2, dim=-1, eps=1e-5)
 
-        cat_embed = torch.cat([e_vr, e_ir], dim=-1)
-        q = self.W_k(cat_embed)
-        sem = torch.sum(q * e_r, dim=-1)
-        sem = self.leakyrelu(sem)
-        dist = self._dist_fn(e_ir, e_r, e_vr)
+            M, e_r = self._get_relation_transform(relation_idx)
+            e_r = e_r.unsqueeze(0).expand(batch_h.size(0), -1)
+
+            e_ir = torch.matmul(h_embed, M.transpose(0, 1))
+            e_vr = torch.matmul(t_embed, M.transpose(0, 1))
+
+            cat_embed = torch.cat([e_vr, e_ir], dim=-1)
+            q = self.W_k(cat_embed)
+            sem_batch = self.leakyrelu(torch.sum(q * e_r, dim=-1))
+            dist_batch = self._dist_fn(e_ir, e_r, e_vr)
+
+            sem[relation_mask] = sem_batch
+            dist[relation_mask] = dist_batch
 
         return sem, dist
 
@@ -531,18 +567,24 @@ class T_AKDN(nn.Module):
         """
         IG Aggregation (Eq. 3 & Eq. 6)
         """
-        ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
-        
         if self.training and self.edge_dropout_rate > 0.0:
-            A_in = self._sparse_dropout(self.A_in, self.edge_dropout_rate, self.A_in._nnz())
+            adj_user_to_item = self._sparse_dropout(
+                self.ig_adj_user_to_item, self.edge_dropout_rate, self.ig_adj_user_to_item._nnz()
+            )
+            adj_item_to_user = self._sparse_dropout(
+                self.ig_adj_item_to_user, self.edge_dropout_rate, self.ig_adj_item_to_user._nnz()
+            )
         else:
-            A_in = self.A_in
+            adj_user_to_item = self.ig_adj_user_to_item
+            adj_item_to_user = self.ig_adj_item_to_user
 
-        ig_output = torch.sparse.mm(A_in, ig_input_ordered)
-        
-        e_items_collab = ig_output[:self.n_entities]
-        e_users_new = ig_output[self.n_entities:]
-        
+        e_items_collab = self._ig_relation_aggregation(
+            adj_user_to_item, e_users_curr, self.ig_relation_user_to_item
+        )
+        e_users_new = self._ig_relation_aggregation(
+            adj_item_to_user, e_items_dual, self.ig_relation_item_to_user
+        )
+
         return e_items_collab, e_users_new
 
     def get_embeddings(self):

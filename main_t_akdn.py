@@ -16,7 +16,7 @@ from parser.parser_t_akdn import parse_t_akdn_args
 from utils.log_helper import *
 from utils.metrics import *
 from utils.model_helper import *
-from data_loader.loader_akdn import DataLoaderAKDN
+from data_loader.loader_t_akdn import DataLoaderTAKDN
 
 
 def evaluate(model, dataloader, Ks, device):
@@ -106,8 +106,8 @@ def train(args):
     # GPU / CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # load data (DataLoaderAKDN をそのまま再利用)
-    data = DataLoaderAKDN(args, logging)
+    # load data (T-AKDN専用 loader)
+    data = DataLoaderTAKDN(args, logging)
     
     # Pretrained Embeddings (if available)
     if args.use_pretrain == 1:
@@ -118,7 +118,9 @@ def train(args):
 
     # construct model & optimizer
     model = T_AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, 
-                   A_in=data.norm_adj_mat, 
+                   A_in=data.norm_adj_mat,
+                   ig_adj_user_to_item=data.norm_adj_user_to_item,
+                   ig_adj_item_to_user=data.norm_adj_item_to_user,
                    user_pre_embed=user_pre_embed, 
                    item_pre_embed=item_pre_embed,
                    edge_dropout_rate=args.edge_dropout_rate)
@@ -235,10 +237,19 @@ def predict(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load data
-    data = DataLoaderAKDN(args, logging)
+    data = DataLoaderTAKDN(args, logging)
 
     # load model
-    model = T_AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, A_in=data.norm_adj_mat)
+    model = T_AKDN(
+        args,
+        data.n_users,
+        data.n_items,
+        data.n_entities,
+        data.n_relations,
+        A_in=data.norm_adj_mat,
+        ig_adj_user_to_item=data.norm_adj_user_to_item,
+        ig_adj_item_to_user=data.norm_adj_item_to_user,
+    )
     model = load_model(model, args.pretrain_model_path)
     model.to(device)
 

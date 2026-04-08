@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data_loader.loader_akdn import DataLoaderAKDN
+from data_loader.loader_t_akdn import DataLoaderTAKDN
 from model.T_AKDN import T_AKDN
 
 
@@ -183,6 +183,8 @@ def build_model(args, data, device):
         data.n_entities,
         data.n_relations,
         A_in=data.norm_adj_mat,
+        ig_adj_user_to_item=data.norm_adj_user_to_item,
+        ig_adj_item_to_user=data.norm_adj_item_to_user,
         user_pre_embed=user_pre_embed,
         item_pre_embed=item_pre_embed,
         edge_dropout_rate=args.edge_dropout_rate,
@@ -220,7 +222,7 @@ def profile_train_loop(args):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data = DataLoaderAKDN(args, logging)
+    data = DataLoaderTAKDN(args, logging)
     model = build_model(args, data, device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
