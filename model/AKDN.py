@@ -254,7 +254,7 @@ class AKDN(nn.Module):
         return out * (1. / (1 - rate))
 
     def _kg_aggregation(self, alpha, e_entities_curr):
-        """
+        r"""
         KG Aggregation (Eq. 1)
         \hat{e}_i^{(l)} = sum( alpha * e_v^{(l-1)} )
         

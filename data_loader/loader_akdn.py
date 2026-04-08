@@ -113,7 +113,6 @@ class DataLoaderAKDN(DataLoaderBase):
         logging.info('n_users:           %d' % self.n_users)
         logging.info('n_items:           %d' % self.n_items)
         logging.info('n_entities:        %d' % self.n_entities)
-        logging.info('n_users_entities:  %d' % self.n_users_entities)
         logging.info('n_relations:       %d' % self.n_relations)
 
         logging.info('n_h_list:          %d' % len(self.h_list))
