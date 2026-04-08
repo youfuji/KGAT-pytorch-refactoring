@@ -6,7 +6,8 @@ def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
 
 class AKDN(nn.Module):
-    def __init__(self, args, n_users, n_items, n_entities, n_relations, A_in=None,
+    def __init__(self, args, n_users, n_items, n_entities, n_relations,
+                 ig_adj_user_to_item=None, ig_adj_item_to_user=None,
                  user_pre_embed=None, item_pre_embed=None, edge_dropout_rate=0.0):   
         super(AKDN, self).__init__()
         self.use_pretrain = args.use_pretrain
@@ -25,23 +26,21 @@ class AKDN(nn.Module):
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
         
-        self.entity_user_embed = nn.Embedding(self.n_entities + self.n_users, self.embed_dim)
+        self.entity_embed = nn.Embedding(self.n_entities, self.embed_dim)
+        self.user_embed = nn.Embedding(self.n_users, self.embed_dim)
         self.relation_embed = nn.Embedding(self.n_relations, self.relation_dim)
         
         # 初期化 (Xavier)
-        nn.init.xavier_uniform_(self.entity_user_embed.weight)
+        nn.init.xavier_uniform_(self.entity_embed.weight)
+        nn.init.xavier_uniform_(self.user_embed.weight)
         nn.init.xavier_uniform_(self.relation_embed.weight)
 
         # 事前学習済み埋め込みのロード
         if (user_pre_embed is not None) and (item_pre_embed is not None):
-            # Item Part (0 ~ n_items)
             # 事前学習データ(MF)は通常アイテムのみの埋め込みを持つため、対応するID部分のみ更新
             n_pre_items = item_pre_embed.shape[0]
-            self.entity_user_embed.weight.data[:n_pre_items].copy_(item_pre_embed)
-            
-            # User Part (n_entities ~ )
-            # ユーザーIDは n_entities から始まるため、そこから user_pre_embed の分だけ更新
-            self.entity_user_embed.weight.data[self.n_entities : self.n_entities + self.n_users].copy_(user_pre_embed)
+            self.entity_embed.weight.data[:n_pre_items].copy_(item_pre_embed)
+            self.user_embed.weight.data.copy_(user_pre_embed)
         
         # 1. KG Attention用パラメータ (Eq. 2)
         # W_k: (d || d) -> d  (連結を入力とする)
@@ -56,9 +55,12 @@ class AKDN(nn.Module):
         nn.init.xavier_uniform_(self.W_b.weight)
         
         # IG用隣接行列 (LightGCN用, User-Item Bipartite)
-        if A_in is not None:
-            self.A_in = nn.Parameter(A_in)
-            self.A_in.requires_grad = False
+        if ig_adj_user_to_item is not None:
+            self.ig_adj_user_to_item = nn.Parameter(ig_adj_user_to_item)
+            self.ig_adj_user_to_item.requires_grad = False
+        if ig_adj_item_to_user is not None:
+            self.ig_adj_item_to_user = nn.Parameter(ig_adj_item_to_user)
+            self.ig_adj_item_to_user.requires_grad = False
         
         # KG用隣接行列 (Attention付き) は update_attention で作成・保持される
         self.A_kg = None
@@ -272,30 +274,21 @@ class AKDN(nn.Module):
         
         return e_items_kg
 
-    def _ig_aggregation(self, e_items_dual, e_users_curr):
-        """
-        IG Aggregation (Eq. 3 & Eq. 6)
-        User Updating: Eq. 6 (Aggregation from Dual Item)
-        Item Updating: Eq. 3 (Aggregation from User)
-        """
-        # 入力ベクトルの結合: [Entities(Dual), Users]
-        # 注意: 行列 A_in のインデックス順序は [Entities, Users]
-        ig_input_ordered = torch.cat([e_items_dual, e_users_curr], dim=0)
-        
-        # Regularization: Edge Dropout (Apply only during training)
+    def _ig_aggregation_item(self, e_users_curr):
         if self.training and self.edge_dropout_rate > 0.0:
-            A_in = self._sparse_dropout(self.A_in, self.edge_dropout_rate, self.A_in._nnz())
+            adj_u2i = self._sparse_dropout(self.ig_adj_user_to_item, self.edge_dropout_rate, self.ig_adj_user_to_item._nnz())
         else:
-            A_in = self.A_in
+            adj_u2i = self.ig_adj_user_to_item
+        e_items_collab = torch.sparse.mm(adj_u2i, e_users_curr)
+        return e_items_collab
 
-        # 伝播
-        ig_output = torch.sparse.mm(A_in, ig_input_ordered)
-        
-        # 出力の分離
-        e_items_collab = ig_output[:self.n_entities] # Item (Collaborative) \tilde{e}
-        e_users_new = ig_output[self.n_entities:]    # User (Updated)
-        
-        return e_items_collab, e_users_new
+    def _ig_aggregation_user(self, e_items_dual):
+        if self.training and self.edge_dropout_rate > 0.0:
+            adj_i2u = self._sparse_dropout(self.ig_adj_item_to_user, self.edge_dropout_rate, self.ig_adj_item_to_user._nnz())
+        else:
+            adj_i2u = self.ig_adj_item_to_user
+        e_users_new = torch.sparse.mm(adj_i2u, e_items_dual)
+        return e_users_new
 
     def get_embeddings(self):
         """
@@ -304,17 +297,12 @@ class AKDN(nn.Module):
         Refactored version: Aggregation logic is separated into helper methods.
         """
         # 初期Embedding (Layer 0)
-        # Note: self.entity_user_embed は _compute_kg_attention ですでに参照されているが、
-        # ここでも伝播の起点として使用する
-        all_embed = self.entity_user_embed.weight
-        
-        # 分離
-        e_entities = all_embed[:self.n_entities]
-        e_users = all_embed[self.n_entities:]
+        e_entities = self.entity_embed.weight
+        e_users = self.user_embed.weight
         
         # 最終的な表現を格納するリスト (Eq. 7: sum of all layers)
         user_embeds_list = [e_users]
-        item_dual_embeds_list = [e_entities]
+        item_dual_embeds_list = [e_entities[:self.n_items]]
         
         # 現在の「Dual Item Representation」 & User & Entity
         # e_items_dual:  IG入力用 (Fusion後のItem表現)
@@ -342,20 +330,33 @@ class AKDN(nn.Module):
             # 1. KG Aggregation (Eq. 1)
             e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
 
-            # 2. IG Aggregation (Eq. 3 & Eq. 6)
-            e_items_collab, e_users_new = self._ig_aggregation(e_items_dual, e_users_curr)
+            # 2. IG Item Aggregation (Eq. 3)
+            e_items_collab = self._ig_aggregation_item(e_users_curr)
             
-            # 3. Fusion Gate (Eq. 4, 5)
-            e_items_dual_new = self.fusion_gate(e_items_kg, e_items_collab)
+            # 3. Fusion Gate (Eq. 4, 5) - アイテムのみに適用
+            e_only_items_kg = e_items_kg[:self.n_items]
+            e_only_items_collab = e_items_collab[:self.n_items]
             
-            # 4. Message Dropout
+            # アイテムはKG表現とIG表現を融合
+            e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
+            
+            # 属性はIGとの接点がないため、Fusion GateをバイパスしてKG表現を100%残す
+            e_attributes_dual = e_items_kg[self.n_items:]
+            
+            # 次の層（およびユーザー集約）のために全エンティティの表現として再結合
+            e_items_dual_new = torch.cat([e_only_items_dual, e_attributes_dual], dim=0)
+            
+            # 4. IG User Aggregation (Eq. 6)
+            e_users_new = self._ig_aggregation_user(e_items_dual_new)
+            
+            # 5. Message Dropout
             if self.mess_dropout[i] > 0.0:
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
                  e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
 
             # ストック & 更新
-            item_dual_embeds_list.append(e_items_dual_new)
+            item_dual_embeds_list.append(e_items_collab[:self.n_items]) # <-- Pure item embeddings only
             user_embeds_list.append(e_users_new)
             
             # 次の層への入力更新
@@ -370,7 +371,7 @@ class AKDN(nn.Module):
         item_final = torch.stack(item_dual_embeds_list, dim=1).sum(dim=1)
         user_final = torch.stack(user_embeds_list, dim=1).sum(dim=1)
         
-        return torch.cat([item_final, user_final], dim=0)
+        return user_final, item_final
 
     def forward(self, mode, *input):
         if mode == 'calc_score':
@@ -381,19 +382,19 @@ class AKDN(nn.Module):
             return self.update_attention(*input)
 
     def calc_score(self, user_ids, item_ids):
-        all_embed = self.get_embeddings()
-        user_embed = all_embed[user_ids] 
-        item_embed = all_embed[item_ids]
+        user_all_embed, item_all_embed = self.get_embeddings()
+        user_embed = user_all_embed[user_ids] 
+        item_embed = item_all_embed[item_ids]
         
         scores = torch.matmul(user_embed, item_embed.transpose(0, 1))
         return scores
 
     def calc_loss(self, user_ids, item_pos_ids, item_neg_ids):
-        all_embed = self.get_embeddings()
+        user_all_embed, item_all_embed = self.get_embeddings()
         
-        user_embed = all_embed[user_ids]
-        pos_embed = all_embed[item_pos_ids]
-        neg_embed = all_embed[item_neg_ids]
+        user_embed = user_all_embed[user_ids]
+        pos_embed = item_all_embed[item_pos_ids]
+        neg_embed = item_all_embed[item_neg_ids]
         
         # BPR Loss (Eq. 9)
         pos_scores = torch.sum(user_embed * pos_embed, dim=1)

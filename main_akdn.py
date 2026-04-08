@@ -88,7 +88,8 @@ def train(args):
     # construct model & optimizer
     # AKDNには IG用の隣接行列(norm_adj_mat) を渡す
     model = AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, 
-                 A_in=data.norm_adj_mat, 
+                 ig_adj_user_to_item=data.norm_adj_user_to_item,
+                 ig_adj_item_to_user=data.norm_adj_item_to_user,
                  user_pre_embed=user_pre_embed, 
                  item_pre_embed=item_pre_embed,
                  edge_dropout_rate=args.edge_dropout_rate)
@@ -202,7 +203,9 @@ def predict(args):
     data = DataLoaderAKDN(args, logging)
 
     # load model
-    model = AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, A_in=data.norm_adj_mat)
+    model = AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, 
+                 ig_adj_user_to_item=data.norm_adj_user_to_item,
+                 ig_adj_item_to_user=data.norm_adj_item_to_user)
     model = load_model(model, args.pretrain_model_path)
     model.to(device)
 
