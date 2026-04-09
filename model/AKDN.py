@@ -304,12 +304,9 @@ class AKDN(nn.Module):
         user_embeds_list = [e_users]
         item_dual_embeds_list = [e_entities[:self.n_items]]
         
-        # 現在の「Dual Item Representation」 & User & Entity
-        # e_items_dual:  IG入力用 (Fusion後のItem表現)
         # e_users_curr:  IG入力用 (User表現)
         # e_entities_curr: KG入力用 (Entity表現)
         
-        e_items_dual = e_entities
         e_users_curr = e_users
         e_entities_curr = e_entities
         
@@ -340,31 +337,23 @@ class AKDN(nn.Module):
             # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
             
-            # 属性はIGとの接点がないため、Fusion GateをバイパスしてKG表現を100%残す
-            e_attributes_dual = e_items_kg[self.n_items:]
-            
-            # 次の層（およびユーザー集約）のために全エンティティの表現として再結合
-            e_items_dual_new = torch.cat([e_only_items_dual, e_attributes_dual], dim=0)
-            
-            # 4. IG User Aggregation (Eq. 6)
-            e_users_new = self._ig_aggregation_user(e_items_dual_new)
+            # 4. IG User Aggregation (Eq. 6) - アイテム表現のみを使用
+            e_users_new = self._ig_aggregation_user(e_only_items_dual)
             
             # 5. Message Dropout
             if self.mess_dropout[i] > 0.0:
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
-                 e_items_dual_new = F.dropout(e_items_dual_new, p=self.mess_dropout[i], training=self.training)
 
             # ストック & 更新
-            item_dual_embeds_list.append(e_items_collab[:self.n_items]) # <-- Pure item embeddings only
+            item_dual_embeds_list.append(e_items_collab) # e_items_collabはアイテムのみ
             user_embeds_list.append(e_users_new)
             
             # 次の層への入力更新
-            e_items_dual = e_items_dual_new
             e_users_curr = e_users_new
             
             # KG側入力の更新 (論文準拠: KG側にIGの情報は含まない)
-            e_entities_curr = e_items_kg 
+            e_entities_curr = e_items_kg
             
 
         # 最終表現 (Eq. 7)

@@ -88,7 +88,7 @@ class DataLoaderAKDN(DataLoaderBase):
             rows.extend(items)
             vals.extend([1.] * len(items))
 
-        adj_u2i = sp.coo_matrix((vals, (rows, cols)), shape=(self.n_entities, self.n_users))
+        adj_u2i = sp.coo_matrix((vals, (rows, cols)), shape=(self.n_items, self.n_users))
         adj_i2u = adj_u2i.T
 
         # それぞれの行（出次数）で正規化
