@@ -63,6 +63,10 @@ def parse_t_akdn_correct_args():
     parser.add_argument('--attn_diag_top_k', type=int, default=2,
                         help='Top-K neighbors for attention ratio diagnostic.')
 
+    # --- TransR Attention Penalty ---
+    parser.add_argument('--attn_lambda', type=float, default=1.0,
+                        help='Lambda weight for the distance score in attention calculation.')
+
     args = parser.parse_args()
 
     # T_AKDN_correct用の保存ディレクトリ設定

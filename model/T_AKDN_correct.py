@@ -52,8 +52,13 @@ class T_AKDN_correct(nn.Module):
         self.relation_embed_k = nn.Embedding(self.n_relations, self.transr_dim)
         nn.init.xavier_uniform_(self.relation_embed_k.weight)
 
-        self.W_k = nn.Linear(self.transr_dim * 2, self.transr_dim)
-        nn.init.xavier_uniform_(self.W_k.weight)
+        self.W_sem = nn.Linear(self.transr_dim * 2, self.transr_dim)
+        nn.init.xavier_uniform_(self.W_sem.weight)
+
+        self.W_dist = nn.Linear(self.transr_dim * 3, 1)
+        nn.init.xavier_uniform_(self.W_dist.weight)
+
+        self.attn_lambda = getattr(args, 'attn_lambda', 1.0)
         
 
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -161,15 +166,19 @@ class T_AKDN_correct(nn.Module):
         
         e_r = F.normalize(self.relation_embed_k(self.r_list), p=2, dim=-1)
         
-        # 2. Semantic Score
+        # 2. Semantic Score (s_sem)
         cat_sem = torch.cat([e_vr, e_ir], dim=-1)
-        q_sem = self.W_k(cat_sem)
-        attention_logits = torch.sum(q_sem * e_r, dim=-1)
+        q_sem = self.W_sem(cat_sem)
+        s_sem = self.leakyrelu(torch.sum(q_sem * e_r, dim=-1))
         
-        # 3. Activation
-        attention_values = self.leakyrelu(attention_logits)
+        # 3. Distance Score (s_dist)
+        cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)
+        s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))
         
-        # 4. Edge Softmax
+        # 4. Final Attention Score (\pi)
+        attention_values = s_sem + self.attn_lambda * s_dist
+        
+        # 5. Edge Softmax
         alpha = self._edge_softmax(attention_values)
 
         if self.record_attention:
