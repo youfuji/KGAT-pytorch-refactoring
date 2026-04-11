@@ -30,6 +30,8 @@ def parse_t_akdn_correct_args():
                         help='Relation Embedding size.')
     parser.add_argument('--transr_dim', type=int, default=64,
                         help='TransR projection dimension (k).')
+    parser.add_argument('--transr_rel_batch_size', type=int, default=10,
+                        help='Number of relation types to process per loop iteration in TransR projection. Smaller values reduce peak VRAM usage.')
 
     parser.add_argument('--conv_dim_list', nargs='?', default='[64, 64, 64]',
                         help='Output sizes of every aggregation layer.')
@@ -64,7 +66,7 @@ def parse_t_akdn_correct_args():
                         help='Top-K neighbors for attention ratio diagnostic.')
 
     # --- TransR Attention Penalty ---
-    parser.add_argument('--attn_lambda', type=float, default=1.0,
+    parser.add_argument('--attn_lambda', type=float, default=0.5,
                         help='Lambda weight for the distance score in attention calculation.')
 
     args = parser.parse_args()
