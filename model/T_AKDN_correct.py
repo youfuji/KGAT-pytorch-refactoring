@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint as ckpt
 
 def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
@@ -326,12 +325,8 @@ class T_AKDN_correct(nn.Module):
                 print(f"\n=== Memory Profile: Layer {i} ===")
                 _mem_log("layer_start")
 
-            # KG Attention + Aggregation (Gradient Checkpointing)
-            if self.record_attention:
-                # 可視化モードでは checkpoint を使わない（backward時の二重記録を防ぐ）
-                alpha = self._compute_kg_attention(e_entities_curr)
-            else:
-                alpha = ckpt(self._compute_kg_attention, e_entities_curr, use_reentrant=False)
+            # KG Attention + Aggregation
+            alpha = self._compute_kg_attention(e_entities_curr)
             _mem_log("after _compute_kg_attention")
 
             # 1. KG Aggregation (Eq. 1)
