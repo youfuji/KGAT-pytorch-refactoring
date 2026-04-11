@@ -98,6 +98,9 @@ class T_AKDN_correct(nn.Module):
         # Ablation Control
         self.gate_control = 'normal' # 'normal', 'kg_only', 'ig_only'
 
+        # デバッグ: 最初の呼び出し時のみループ回数を出力
+        self._loop_debug_printed = False
+
 
 
     def set_kg_structure(self, h_list, t_list, r_list, relations):
@@ -166,13 +169,18 @@ class T_AKDN_correct(nn.Module):
         # ループ外に保持するのはスカラー [E] のみ (~20MB)
         attention_values = torch.empty(self.n_edges, device=device)
 
+        n_loop_total = 0   # ループの総イテレーション数
+        n_loop_active = 0  # mask.any() == True だった有効イテレーション数
+
         for r_start in range(0, self.n_relations, self.transr_rel_batch_size):
             r_end = min(r_start + self.transr_rel_batch_size, self.n_relations)
 
             # 該当エッジのマスク: r_list の値が [r_start, r_end) に含まれるか
+            n_loop_total += 1
             mask = (self.r_list >= r_start) & (self.r_list < r_end)  # [E] bool
             if not mask.any():
                 continue
+            n_loop_active += 1
 
             r_chunk = self.r_list[mask]  # [E_chunk]
 
@@ -200,6 +208,12 @@ class T_AKDN_correct(nn.Module):
 
         # 全エッジ [E] のスカラーに対して Edge Softmax
         alpha = self._edge_softmax(attention_values)
+
+        if not self._loop_debug_printed:
+            print(f"[TransR loop] n_relations={self.n_relations}, "
+                  f"rel_batch_size={self.transr_rel_batch_size}, "
+                  f"total_iters={n_loop_total}, active_iters={n_loop_active}")
+            self._loop_debug_printed = True
 
         if self.record_attention:
             item_edge_mask = self.h_list < self.n_items
