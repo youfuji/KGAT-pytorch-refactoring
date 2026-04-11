@@ -100,6 +100,7 @@ class T_AKDN_correct(nn.Module):
 
         # デバッグ: 最初の呼び出し時のみループ回数を出力
         self._loop_debug_printed = False
+        self._memory_debug_printed = False
 
 
 
@@ -343,15 +344,30 @@ class T_AKDN_correct(nn.Module):
         if self.record_attention:
             self.attention_records = []
 
+        _do_mem_log = (not self._memory_debug_printed) and e_entities_curr.is_cuda
+        def _mem_log(label):
+            if not _do_mem_log:
+                return
+            alloc = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            print(f"  [MEM] {label}: allocated={alloc:.1f}MB, reserved={reserved:.1f}MB")
+
         for i in range(self.n_layers):
+            if _do_mem_log:
+                print(f"\n=== Memory Profile: Layer {i} ===")
+                _mem_log("layer_start")
+
             # KG Attention + Aggregation
             alpha = self._compute_kg_attention(e_entities_curr)
+            _mem_log("after _compute_kg_attention")
 
             # 1. KG Aggregation (Eq. 1)
             e_items_kg = self._kg_aggregation(alpha, e_entities_curr)
+            _mem_log("after _kg_aggregation")
 
             # 2. IG Item Aggregation (Eq. 3)
             e_items_collab = self._ig_aggregation_item(e_users_curr)
+            _mem_log("after _ig_aggregation_item")
             
             # 3. Fusion Gate (Eq. 4, 5) - アイテムのみに適用
             e_only_items_kg = e_items_kg[:self.n_items]
@@ -359,14 +375,17 @@ class T_AKDN_correct(nn.Module):
             
             # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
+            _mem_log("after fusion_gate")
             
             # 4. IG User Aggregation (Eq. 6) - アイテム表現のみを使用
             e_users_new = self._ig_aggregation_user(e_only_items_dual)
+            _mem_log("after _ig_aggregation_user")
             
             # 5. Message Dropout
             if self.mess_dropout[i] > 0.0:
                  e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
+            _mem_log("after dropout")
 
             # ストック & 更新
             item_dual_embeds_list.append(e_only_items_collab) # 図の通り IG(LightGCN)からの集約情報のアイテム部分のみを使用
@@ -377,6 +396,9 @@ class T_AKDN_correct(nn.Module):
             
             # KG側入力の更新 (論文準拠: KG側にIGの情報は含まない)
             e_entities_curr = e_items_kg
+
+        if _do_mem_log:
+            self._memory_debug_printed = True
             
 
         # 最終表現 (Eq. 7)

@@ -135,6 +135,7 @@ def train(args):
         total_loss = 0
         n_batch = data.n_cf_train // data.cf_batch_size + 1
 
+        _mem_profiled = False
         for iter in range(1, n_batch + 1):
             time_iter = time()
             cf_batch_user, cf_batch_pos_item, cf_batch_neg_item = data.generate_cf_batch(data.train_user_dict, data.cf_batch_size)
@@ -142,16 +143,27 @@ def train(args):
             cf_batch_pos_item = cf_batch_pos_item.to(device)
             cf_batch_neg_item = cf_batch_neg_item.to(device)
 
+            _do_mem = (not _mem_profiled) and torch.cuda.is_available()
+
             # T_AKDN_correct の calc_loss を呼び出し
             batch_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+            if _do_mem:
+                print(f"  [MEM] after forward (calc_loss): allocated={torch.cuda.memory_allocated()/1024**2:.1f}MB, reserved={torch.cuda.memory_reserved()/1024**2:.1f}MB")
 
             if np.isnan(batch_loss.cpu().detach().numpy()):
                 logging.info('ERROR (CF Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_batch))
                 sys.exit()
 
             batch_loss.backward()
+            if _do_mem:
+                print(f"  [MEM] after backward: allocated={torch.cuda.memory_allocated()/1024**2:.1f}MB, reserved={torch.cuda.memory_reserved()/1024**2:.1f}MB")
+
             optimizer.step()
             optimizer.zero_grad()
+            if _do_mem:
+                print(f"  [MEM] after optimizer.step + zero_grad: allocated={torch.cuda.memory_allocated()/1024**2:.1f}MB, reserved={torch.cuda.memory_reserved()/1024**2:.1f}MB")
+                _mem_profiled = True
+
             total_loss += batch_loss.item()
 
             if (iter % args.cf_print_every) == 0:
