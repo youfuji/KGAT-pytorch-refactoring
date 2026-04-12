@@ -160,23 +160,36 @@ class T_AKDN_correct(nn.Module):
         1バッチ分のエッジに対する attention score を計算。
         checkpoint でラップされるため、中間テンソルは forward 後に解放される。
         
+        射影行列 M_r は関係ごとに共有されるため、bmm の代わりに
+        関係ごとの matmul を用い、M_chunk [E_chunk, k, d] の生成を回避する。
+        
         Args:
             e_entities_curr: [N, d] 全エンティティ埋め込み
             edge_indices: [E_chunk] このバッチで処理するエッジのインデックス
         Returns:
             scores: [E_chunk] attention logits (スカラー)
         """
+        device = e_entities_curr.device
         r_chunk = self.r_list[edge_indices]
         
         W_r = self.transr_proj.weight.view(self.n_relations, self.transr_dim, self.embed_dim)
         
         h_chunk = F.normalize(e_entities_curr[self.h_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
         t_chunk = F.normalize(e_entities_curr[self.t_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
-        M_chunk = W_r[r_chunk]                                                          # [E_chunk, k, d]
         
-        e_ir = torch.bmm(M_chunk, h_chunk.unsqueeze(-1)).squeeze(-1)                   # [E_chunk, k]
-        e_vr = torch.bmm(M_chunk, t_chunk.unsqueeze(-1)).squeeze(-1)                   # [E_chunk, k]
-        e_r  = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                # [E_chunk, k]
+        # 関係ごとに matmul: M_r [k, d] を1つだけ使用
+        # (従来: M_chunk = W_r[r_chunk] → [E_chunk, k, d] ≈ 6.7GB をここで回避)
+        n_chunk = len(edge_indices)
+        e_ir = torch.zeros(n_chunk, self.transr_dim, device=device)
+        e_vr = torch.zeros(n_chunk, self.transr_dim, device=device)
+        
+        for r in r_chunk.unique():
+            r_mask = (r_chunk == r)
+            M_r = W_r[r]                            # [k, d] — 16KB のみ
+            e_ir[r_mask] = h_chunk[r_mask] @ M_r.T  # [E_r, d] @ [d, k] → [E_r, k]
+            e_vr[r_mask] = t_chunk[r_mask] @ M_r.T
+        
+        e_r = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                # [E_chunk, k]
         
         # Semantic Score
         cat_sem = torch.cat([e_vr, e_ir], dim=-1)                                      # [E_chunk, 2k]
