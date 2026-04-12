@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as ckpt
 
 def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
@@ -20,6 +21,7 @@ class T_AKDN_correct(nn.Module):
         self.embed_dim = args.embed_dim
         self.relation_dim = args.relation_dim
         self.transr_dim = args.transr_dim
+        self.transr_rel_batch_size = getattr(args, 'transr_rel_batch_size', 10)
         
         self.mess_dropout = eval(args.mess_dropout)
         self.edge_dropout_rate = edge_dropout_rate
@@ -153,38 +155,93 @@ class T_AKDN_correct(nn.Module):
         alpha = exp_logits / (sum_exp[self.h_list] + 1e-16)
         return alpha
 
+    def _compute_attention_chunk(self, e_entities_curr, edge_indices):
+        """
+        1バッチ分のエッジに対する attention score を計算。
+        checkpoint でラップされるため、中間テンソルは forward 後に解放される。
+        
+        Args:
+            e_entities_curr: [N, d] 全エンティティ埋め込み
+            edge_indices: [E_chunk] このバッチで処理するエッジのインデックス
+        Returns:
+            scores: [E_chunk] attention logits (スカラー)
+        """
+        r_chunk = self.r_list[edge_indices]
+        
+        W_r = self.transr_proj.weight.view(self.n_relations, self.transr_dim, self.embed_dim)
+        
+        h_chunk = F.normalize(e_entities_curr[self.h_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
+        t_chunk = F.normalize(e_entities_curr[self.t_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
+        M_chunk = W_r[r_chunk]                                                          # [E_chunk, k, d]
+        
+        e_ir = torch.bmm(M_chunk, h_chunk.unsqueeze(-1)).squeeze(-1)                   # [E_chunk, k]
+        e_vr = torch.bmm(M_chunk, t_chunk.unsqueeze(-1)).squeeze(-1)                   # [E_chunk, k]
+        e_r  = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                # [E_chunk, k]
+        
+        # Semantic Score
+        cat_sem = torch.cat([e_vr, e_ir], dim=-1)                                      # [E_chunk, 2k]
+        s_sem = self.leakyrelu(torch.sum(self.W_sem(cat_sem) * e_r, dim=-1))           # [E_chunk]
+        
+        # Distance Score
+        cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)                                # [E_chunk, 3k]
+        s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))                     # [E_chunk]
+        
+        return s_sem + self.attn_lambda * s_dist
+
     def _compute_kg_attention(self, e_entities_curr):
         """
-        TransR-CKG Unified KG Attention を計算
+        TransR-CKG Unified KG Attention を計算。
+        
+        関係バッチごとに内部 checkpoint を適用し、ピーク作業メモリを
+        (全エッジ一括) → (1バッチ分のエッジ) に削減する。
         """
-        # 1. Normalize and Projection
-        h_embed = F.normalize(e_entities_curr[self.h_list], p=2, dim=-1)
-        t_embed = F.normalize(e_entities_curr[self.t_list], p=2, dim=-1)
+        device = e_entities_curr.device
         
-        # M_r shape: (E, k, d)
-        M = self.transr_proj.weight[self.r_list].view(-1, self.transr_dim, self.embed_dim)
+        all_scores = []
+        all_indices = []
         
-        # bmm( M, h ) => (E, k)
-        e_ir = torch.bmm(M, h_embed.unsqueeze(-1)).squeeze(-1)
-        e_vr = torch.bmm(M, t_embed.unsqueeze(-1)).squeeze(-1)
+        n_loop_total = 0
+        n_loop_active = 0
         
-        e_r = F.normalize(self.relation_embed_k(self.r_list), p=2, dim=-1)
+        for r_start in range(0, self.n_relations, self.transr_rel_batch_size):
+            r_end = min(r_start + self.transr_rel_batch_size, self.n_relations)
+            n_loop_total += 1
+            
+            mask = (self.r_list >= r_start) & (self.r_list < r_end)
+            if not mask.any():
+                continue
+            n_loop_active += 1
+            
+            edge_indices = mask.nonzero(as_tuple=True)[0]
+            
+            # 各バッチを独立に checkpoint: 中間テンソル [E_chunk, k, d] 等は
+            # このバッチの計算完了後に解放され、backward 時に再計算される
+            chunk_scores = ckpt(
+                self._compute_attention_chunk,
+                e_entities_curr, edge_indices,
+                use_reentrant=False
+            )
+            
+            all_scores.append(chunk_scores)
+            all_indices.append(edge_indices)
         
-        # 2. Semantic Score (s_sem)
-        cat_sem = torch.cat([e_vr, e_ir], dim=-1)
-        q_sem = self.W_sem(cat_sem)
-        s_sem = self.leakyrelu(torch.sum(q_sem * e_r, dim=-1))
+        # out-of-place で組み立て（autograd フレンドリー）
+        scores = torch.cat(all_scores)
+        indices = torch.cat(all_indices)
+        attention_values = torch.zeros(self.n_edges, device=device)
+        attention_values = attention_values.scatter(0, indices, scores)
         
-        # 3. Distance Score (s_dist)
-        cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)
-        s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))
-        
-        # 4. Final Attention Score (\pi)
-        attention_values = s_sem + self.attn_lambda * s_dist
-        
-        # 5. Edge Softmax
+        # Edge Softmax
         alpha = self._edge_softmax(attention_values)
-
+        
+        # デバッグ出力（初回のみ）
+        if not self._loop_debug_printed:
+            print(f"[TransR loop] n_relations={self.n_relations}, "
+                  f"rel_batch_size={self.transr_rel_batch_size}, "
+                  f"total_iters={n_loop_total}, active_iters={n_loop_active}")
+            self._loop_debug_printed = True
+        
+        # Attention 記録（eval時のみ、checkpoint 外なので二重記録なし）
         if self.record_attention:
             item_edge_mask = self.h_list < self.n_items
             self.attention_records.append({

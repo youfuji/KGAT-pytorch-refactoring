@@ -66,6 +66,8 @@ def parse_t_akdn_correct_args():
     # --- TransR Attention Penalty ---
     parser.add_argument('--attn_lambda', type=float, default=0.5,
                         help='Lambda weight for the distance score in attention calculation.')
+    parser.add_argument('--transr_rel_batch_size', type=int, default=10,
+                        help='Number of relations to process per batch in TransR attention (for memory control).')
 
     args = parser.parse_args()
 
