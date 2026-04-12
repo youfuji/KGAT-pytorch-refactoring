@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint as ckpt
 
 def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
@@ -21,7 +20,7 @@ class T_AKDN_correct(nn.Module):
         self.embed_dim = args.embed_dim
         self.relation_dim = args.relation_dim
         self.transr_dim = args.transr_dim
-        self.transr_rel_batch_size = getattr(args, 'transr_rel_batch_size', 10)
+
         
         self.mess_dropout = eval(args.mess_dropout)
         self.edge_dropout_rate = edge_dropout_rate
@@ -107,24 +106,25 @@ class T_AKDN_correct(nn.Module):
 
     def set_kg_structure(self, h_list, t_list, r_list, relations):
         """
-        KGの構造情報（インデックス）を保存
+        KGの構造情報（インデックス）を保存し、attention高速化用の事前計算を行う
         """
         self.h_list = h_list
         self.t_list = t_list
-        # r_listはRelation EmbeddingのLookupに使う
         self.r_list = r_list
         self.relations_set = relations
-        
-        # Sparse Matrixのインデックスは静的なので事前に構築しておく
-        # rows: h, cols: t
-        # ただし、Attention計算後に値を埋め込むために並びを把握しておく必要がある
-        # ここでは単純化のため、全エッジに対して一括でAttentionを計算する方式をとる
         
         # エッジ数
         self.n_edges = len(h_list)
         
         # Sparse Matrix用インデックス (2, n_edges)
         self.kg_indices = torch.stack([h_list, t_list], dim=0)
+        
+        # 関係ごとのエッジインデックスを事前計算（attention内のunique()+マスク生成を除去）
+        self.per_rel_edges = {}
+        for r_val in range(int(r_list.max().item()) + 1):
+            mask = (r_list == r_val)
+            if mask.any():
+                self.per_rel_edges[r_val] = mask.nonzero(as_tuple=True)[0]
 
     def _edge_softmax(self, logits):
         """
@@ -155,106 +155,53 @@ class T_AKDN_correct(nn.Module):
         alpha = exp_logits / (sum_exp[self.h_list] + 1e-16)
         return alpha
 
-    def _compute_attention_chunk(self, e_entities_curr, edge_indices):
-        """
-        1バッチ分のエッジに対する attention score を計算。
-        checkpoint でラップされるため、中間テンソルは forward 後に解放される。
-        
-        射影行列 M_r は関係ごとに共有されるため、bmm の代わりに
-        関係ごとの matmul を用い、M_chunk [E_chunk, k, d] の生成を回避する。
-        
-        Args:
-            e_entities_curr: [N, d] 全エンティティ埋め込み
-            edge_indices: [E_chunk] このバッチで処理するエッジのインデックス
-        Returns:
-            scores: [E_chunk] attention logits (スカラー)
-        """
-        device = e_entities_curr.device
-        r_chunk = self.r_list[edge_indices]
-        
-        W_r = self.transr_proj.weight.view(self.n_relations, self.transr_dim, self.embed_dim)
-        
-        h_chunk = F.normalize(e_entities_curr[self.h_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
-        t_chunk = F.normalize(e_entities_curr[self.t_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
-        
-        # 関係ごとに matmul: M_r [k, d] を1つだけ使用
-        # (従来: M_chunk = W_r[r_chunk] → [E_chunk, k, d] ≈ 6.7GB をここで回避)
-        n_chunk = len(edge_indices)
-        e_ir = torch.zeros(n_chunk, self.transr_dim, device=device)
-        e_vr = torch.zeros(n_chunk, self.transr_dim, device=device)
-        
-        for r in r_chunk.unique():
-            r_mask = (r_chunk == r)
-            M_r = W_r[r]                            # [k, d] — 16KB のみ
-            e_ir[r_mask] = h_chunk[r_mask] @ M_r.T  # [E_r, d] @ [d, k] → [E_r, k]
-            e_vr[r_mask] = t_chunk[r_mask] @ M_r.T
-        
-        e_r = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                # [E_chunk, k]
-        
-        # Semantic Score
-        cat_sem = torch.cat([e_vr, e_ir], dim=-1)                                      # [E_chunk, 2k]
-        s_sem = self.leakyrelu(torch.sum(self.W_sem(cat_sem) * e_r, dim=-1))           # [E_chunk]
-        
-        # Distance Score
-        cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)                                # [E_chunk, 3k]
-        s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))                     # [E_chunk]
-        
-        return s_sem + self.attn_lambda * s_dist
-
     def _compute_kg_attention(self, e_entities_curr):
         """
         TransR-CKG Unified KG Attention を計算。
         
-        関係バッチごとに内部 checkpoint を適用し、ピーク作業メモリを
-        (全エッジ一括) → (1バッチ分のエッジ) に削減する。
+        射影行列 M_r は関係ごとに共有されるため、関係ごとの matmul で
+        [E, k, d] テンソルの生成を回避する。事前計算済みの per_rel_edges を
+        使用し、runtime の unique() + ブールマスクも除去。
         """
         device = e_entities_curr.device
+        W_r = self.transr_proj.weight.view(self.n_relations, self.transr_dim, self.embed_dim)
         
-        all_scores = []
-        all_indices = []
+        # 全エッジの h/t を一括正規化
+        h_all = F.normalize(e_entities_curr[self.h_list], p=2, dim=-1)  # [E, d]
+        t_all = F.normalize(e_entities_curr[self.t_list], p=2, dim=-1)  # [E, d]
         
-        n_loop_total = 0
-        n_loop_active = 0
+        # 関係ごとに matmul: M_r [k, d] を1つだけ使用（事前計算インデックス）
+        e_ir = torch.zeros(self.n_edges, self.transr_dim, device=device)
+        e_vr = torch.zeros(self.n_edges, self.transr_dim, device=device)
         
-        for r_start in range(0, self.n_relations, self.transr_rel_batch_size):
-            r_end = min(r_start + self.transr_rel_batch_size, self.n_relations)
-            n_loop_total += 1
-            
-            mask = (self.r_list >= r_start) & (self.r_list < r_end)
-            if not mask.any():
-                continue
-            n_loop_active += 1
-            
-            edge_indices = mask.nonzero(as_tuple=True)[0]
-            
-            # 各バッチを独立に checkpoint: 中間テンソル [E_chunk, k, d] 等は
-            # このバッチの計算完了後に解放され、backward 時に再計算される
-            chunk_scores = ckpt(
-                self._compute_attention_chunk,
-                e_entities_curr, edge_indices,
-                use_reentrant=False
-            )
-            
-            all_scores.append(chunk_scores)
-            all_indices.append(edge_indices)
+        for r_val, r_edges in self.per_rel_edges.items():
+            M_r = W_r[r_val]                            # [k, d] — 16KB のみ
+            e_ir[r_edges] = h_all[r_edges] @ M_r.T      # [E_r, d] @ [d, k] → [E_r, k]
+            e_vr[r_edges] = t_all[r_edges] @ M_r.T
         
-        # out-of-place で組み立て（autograd フレンドリー）
-        scores = torch.cat(all_scores)
-        indices = torch.cat(all_indices)
-        attention_values = torch.zeros(self.n_edges, device=device)
-        attention_values = attention_values.scatter(0, indices, scores)
+        e_r = F.normalize(self.relation_embed_k(self.r_list), p=2, dim=-1)  # [E, k]
+        
+        # Semantic Score (s_sem)
+        cat_sem = torch.cat([e_vr, e_ir], dim=-1)                           # [E, 2k]
+        s_sem = self.leakyrelu(torch.sum(self.W_sem(cat_sem) * e_r, dim=-1)) # [E]
+        
+        # Distance Score (s_dist)
+        cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)                     # [E, 3k]
+        s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))           # [E]
+        
+        # Final Attention Score
+        attention_values = s_sem + self.attn_lambda * s_dist
         
         # Edge Softmax
         alpha = self._edge_softmax(attention_values)
         
         # デバッグ出力（初回のみ）
         if not self._loop_debug_printed:
-            print(f"[TransR loop] n_relations={self.n_relations}, "
-                  f"rel_batch_size={self.transr_rel_batch_size}, "
-                  f"total_iters={n_loop_total}, active_iters={n_loop_active}")
+            print(f"[TransR attention] n_relations={self.n_relations}, "
+                  f"n_edges={self.n_edges}, n_active_relations={len(self.per_rel_edges)}")
             self._loop_debug_printed = True
         
-        # Attention 記録（eval時のみ、checkpoint 外なので二重記録なし）
+        # Attention 記録（eval時のみ）
         if self.record_attention:
             item_edge_mask = self.h_list < self.n_items
             self.attention_records.append({
