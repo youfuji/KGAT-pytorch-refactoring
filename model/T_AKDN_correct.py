@@ -60,8 +60,9 @@ class T_AKDN_correct(nn.Module):
         self.W_dist = nn.Linear(self.transr_dim * 3, 1)
         nn.init.xavier_uniform_(self.W_dist.weight)
 
-        self.attn_lambda = getattr(args, 'attn_lambda', 1.0)
-        
+        self.edge_gate_layer = nn.Linear(2, 1)
+        nn.init.xavier_uniform_(self.edge_gate_layer.weight)
+        self.sigmoid = nn.Sigmoid()
 
         # 2. Fusion Gate用パラメータ (Eq. 4)
         # Gateはアイテムに対してのみ適用される
@@ -162,12 +163,6 @@ class T_AKDN_correct(nn.Module):
         
         射影行列 M_r は関係ごとに共有されるため、bmm の代わりに
         関係ごとの matmul を用い、M_chunk [E_chunk, k, d] の生成を回避する。
-        
-        Args:
-            e_entities_curr: [N, d] 全エンティティ埋め込み
-            edge_indices: [E_chunk] このバッチで処理するエッジのインデックス
-        Returns:
-            scores: [E_chunk] attention logits (スカラー)
         """
         device = e_entities_curr.device
         r_chunk = self.r_list[edge_indices]
@@ -178,28 +173,42 @@ class T_AKDN_correct(nn.Module):
         t_chunk = F.normalize(e_entities_curr[self.t_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
         
         # 関係ごとに matmul: M_r [k, d] を1つだけ使用
-        # (従来: M_chunk = W_r[r_chunk] → [E_chunk, k, d] ≈ 6.7GB をここで回避)
         n_chunk = len(edge_indices)
         e_ir = torch.zeros(n_chunk, self.transr_dim, device=device)
         e_vr = torch.zeros(n_chunk, self.transr_dim, device=device)
         
         for r in r_chunk.unique():
             r_mask = (r_chunk == r)
-            M_r = W_r[r]                            # [k, d] — 16KB のみ
+            M_r = W_r[r]                            # [k, d]
             e_ir[r_mask] = h_chunk[r_mask] @ M_r.T  # [E_r, d] @ [d, k] → [E_r, k]
             e_vr[r_mask] = t_chunk[r_mask] @ M_r.T
         
-        e_r = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                # [E_chunk, k]
+        e_r = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                 # [E_chunk, k]
         
-        # Semantic Score
+        # Semantic Score (値が大きいほど良い)
         cat_sem = torch.cat([e_vr, e_ir], dim=-1)                                      # [E_chunk, 2k]
         s_sem = self.leakyrelu(torch.sum(self.W_sem(cat_sem) * e_r, dim=-1))           # [E_chunk]
         
-        # Distance Score
+        # Distance Score (MLP出力なので、値が大きいほど良いと仮定)
         cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)                                # [E_chunk, 3k]
         s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))                     # [E_chunk]
         
-        return s_sem + self.attn_lambda * s_dist
+        # ====================================================
+        # 新規追加: Edge-level Fusion Gate による最適ブレンド
+        # ====================================================
+        epsilon = 1e-8
+        
+        # 1. チャンク内でのZスコア正規化 (スケールを揃える)
+        sem_norm = (s_sem - s_sem.mean()) / (s_sem.std(unbiased=False) + epsilon)
+        dist_norm = (s_dist - s_dist.mean()) / (s_dist.std(unbiased=False) + epsilon)
+        
+        # 2. Gateネットワークへの入力作成 [E_chunk, 2]
+        g_lambda_input = torch.stack([sem_norm, dist_norm], dim=-1)
+        
+        # 3. 割合(g)の算出: 0.0 ~ 1.0
+        g_lambda = torch.sigmoid(self.edge_gate_layer(g_lambda_input)).squeeze(-1)
+        
+        return g_lambda * sem_norm + (1.0 - g_lambda) * dist_norm
 
     def _compute_kg_attention(self, e_entities_curr):
         """
