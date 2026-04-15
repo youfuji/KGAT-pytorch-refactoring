@@ -133,6 +133,8 @@ def train(args):
         # ------------------------------------------------------------------
         time_cf = time()
         total_loss = 0
+        total_g_lambda = 0
+        total_layer_g_lambda = None
         n_batch = data.n_cf_train // data.cf_batch_size + 1
 
         _mem_profiled = False
@@ -146,7 +148,7 @@ def train(args):
             _do_mem = (not _mem_profiled) and torch.cuda.is_available()
 
             # T_AKDN_correct の calc_loss を呼び出し
-            batch_loss = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
+            batch_loss, batch_g_lambda, batch_layer_g_lambda = model('calc_loss', cf_batch_user, cf_batch_pos_item, cf_batch_neg_item)
             if _do_mem:
                 print(f"  [MEM] after forward (calc_loss): allocated={torch.cuda.memory_allocated()/1024**2:.1f}MB, reserved={torch.cuda.memory_reserved()/1024**2:.1f}MB")
 
@@ -165,11 +167,22 @@ def train(args):
                 _mem_profiled = True
 
             total_loss += batch_loss.item()
+            total_g_lambda += batch_g_lambda.item()
+            batch_layer_g_lambda_cpu = batch_layer_g_lambda.detach().cpu()
+            if total_layer_g_lambda is None:
+                total_layer_g_lambda = torch.zeros_like(batch_layer_g_lambda_cpu)
+            total_layer_g_lambda += batch_layer_g_lambda_cpu
 
             if (iter % args.cf_print_every) == 0:
-                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter))
+                layer_lambda_text = ','.join(['L{}:{:.4f}'.format(i + 1, v) for i, v in enumerate(batch_layer_g_lambda_cpu.tolist())])
+                logging.info('CF Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f} | g_lambda {:.4f} | g_lambda Mean {:.4f} | layer_g_lambda [{}]'.format(epoch, iter, n_batch, time() - time_iter, batch_loss.item(), total_loss / iter, batch_g_lambda.item(), total_g_lambda / iter, layer_lambda_text))
         
-        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch))
+        if total_layer_g_lambda is None:
+            epoch_layer_lambda_text = ''
+        else:
+            epoch_layer_lambda = total_layer_g_lambda / n_batch
+            epoch_layer_lambda_text = ','.join(['L{}:{:.4f}'.format(i + 1, v) for i, v in enumerate(epoch_layer_lambda.tolist())])
+        logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f} | g_lambda Mean {:.4f} | layer_g_lambda Mean [{}]'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch, total_g_lambda / n_batch, epoch_layer_lambda_text))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # ------------------------------------------------------------------

@@ -103,6 +103,8 @@ class T_AKDN_correct(nn.Module):
         # デバッグ: 最初の呼び出し時のみループ回数を出力
         self._loop_debug_printed = False
         self._memory_debug_printed = False
+        self.last_g_lambda = None
+        self.last_layer_g_lambda = None
 
 
 
@@ -207,8 +209,13 @@ class T_AKDN_correct(nn.Module):
         
         # 3. 割合(g)の算出: 0.0 ~ 1.0
         g_lambda = torch.sigmoid(self.edge_gate_layer(g_lambda_input)).squeeze(-1)
-        
-        return g_lambda * sem_norm + (1.0 - g_lambda) * dist_norm
+
+        # チャンク内で集約して返す（ベクトルを外へ出さない）
+        g_lambda_sum = g_lambda.detach().sum()
+        g_lambda_count = g_lambda.new_tensor(float(g_lambda.numel())).detach()
+
+        blended_score = g_lambda * sem_norm + (1.0 - g_lambda) * dist_norm
+        return blended_score, g_lambda_sum, g_lambda_count
 
     def _compute_kg_attention(self, e_entities_curr):
         """
@@ -221,6 +228,8 @@ class T_AKDN_correct(nn.Module):
         
         all_scores = []
         all_indices = []
+        g_lambda_sum = torch.zeros(1, device=device)
+        g_lambda_count = torch.zeros(1, device=device)
         
         n_loop_total = 0
         n_loop_active = 0
@@ -238,7 +247,7 @@ class T_AKDN_correct(nn.Module):
             
             # 各バッチを独立に checkpoint: 中間テンソル [E_chunk, k, d] 等は
             # このバッチの計算完了後に解放され、backward 時に再計算される
-            chunk_scores = ckpt(
+            chunk_scores, chunk_g_lambda_sum, chunk_g_lambda_count = ckpt(
                 self._compute_attention_chunk,
                 e_entities_curr, edge_indices,
                 use_reentrant=False
@@ -246,6 +255,8 @@ class T_AKDN_correct(nn.Module):
             
             all_scores.append(chunk_scores)
             all_indices.append(edge_indices)
+            g_lambda_sum = g_lambda_sum + chunk_g_lambda_sum
+            g_lambda_count = g_lambda_count + chunk_g_lambda_count
         
         # out-of-place で組み立て（autograd フレンドリー）
         scores = torch.cat(all_scores)
@@ -275,7 +286,8 @@ class T_AKDN_correct(nn.Module):
                 'alpha': alpha[item_edge_mask].detach().cpu(),
             })
         
-        return alpha  # [E]
+        g_lambda_mean = g_lambda_sum / torch.clamp(g_lambda_count, min=1.0)
+        return alpha, g_lambda_mean.squeeze(0)  # [E], scalar
 
 
 
@@ -391,6 +403,8 @@ class T_AKDN_correct(nn.Module):
         if self.record_attention:
             self.attention_records = []
 
+        layer_g_lambda_means = []
+
         _do_mem_log = (not self._memory_debug_printed) and e_entities_curr.is_cuda
         def _mem_log(label):
             if not _do_mem_log:
@@ -405,7 +419,8 @@ class T_AKDN_correct(nn.Module):
                 _mem_log("layer_start")
 
             # KG Attention + Aggregation
-            alpha = self._compute_kg_attention(e_entities_curr)
+            alpha, g_lambda_mean = self._compute_kg_attention(e_entities_curr)
+            layer_g_lambda_means.append(g_lambda_mean)
             _mem_log("after _compute_kg_attention")
 
             # 1. KG Aggregation (Eq. 1)
@@ -446,6 +461,13 @@ class T_AKDN_correct(nn.Module):
 
         if _do_mem_log:
             self._memory_debug_printed = True
+
+        if layer_g_lambda_means:
+            self.last_layer_g_lambda = torch.stack(layer_g_lambda_means).detach()
+            self.last_g_lambda = self.last_layer_g_lambda.mean()
+        else:
+            self.last_g_lambda = None
+            self.last_layer_g_lambda = None
             
 
         # 最終表現 (Eq. 7)
@@ -485,5 +507,17 @@ class T_AKDN_correct(nn.Module):
         
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
-        return cf_loss + self.cf_l2loss_lambda * l2_loss
+        loss = cf_loss + self.cf_l2loss_lambda * l2_loss
+
+        if self.last_g_lambda is None:
+            g_lambda_out = torch.tensor(float('nan'), device=loss.device)
+        else:
+            g_lambda_out = self.last_g_lambda.to(loss.device)
+
+        if self.last_layer_g_lambda is None:
+            layer_g_lambda_out = torch.full((self.n_layers,), float('nan'), device=loss.device)
+        else:
+            layer_g_lambda_out = self.last_layer_g_lambda.to(loss.device)
+
+        return loss, g_lambda_out, layer_g_lambda_out
         
