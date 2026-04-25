@@ -426,7 +426,7 @@ class T_AKDN_correct(nn.Module):
             _mem_log("after dropout")
 
             # ストック & 更新
-            item_dual_embeds_list.append(e_only_items_collab) # 図の通り IG(LightGCN)からの集約情報のアイテム部分のみを使用
+            item_dual_embeds_list.append(e_only_items_dual)   # 提案A: Fusion Gate出力をストック (KG情報を最終表現に反映)
             user_embeds_list.append(e_users_new)
             
             # 次の層への入力更新
