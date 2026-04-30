@@ -57,12 +57,6 @@ class T_AKDN_correct(nn.Module):
         self.W_sem = nn.Linear(self.transr_dim * 2, self.transr_dim)
         nn.init.xavier_uniform_(self.W_sem.weight)
 
-        self.W_dist = nn.Linear(self.transr_dim * 3, 1)
-        nn.init.xavier_uniform_(self.W_dist.weight)
-
-        self.attn_lambda = getattr(args, 'attn_lambda', 1.0)
-        
-
         # 2. Fusion Gate用パラメータ (Eq. 4)
         # Gateはアイテムに対してのみ適用される
         self.W_a = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -195,11 +189,7 @@ class T_AKDN_correct(nn.Module):
         cat_sem = torch.cat([e_vr, e_ir], dim=-1)                                      # [E_chunk, 2k]
         s_sem = self.leakyrelu(torch.sum(self.W_sem(cat_sem) * e_r, dim=-1))           # [E_chunk]
         
-        # Distance Score
-        cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)                                # [E_chunk, 3k]
-        s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))                     # [E_chunk]
-        
-        return s_sem + self.attn_lambda * s_dist
+        return s_sem
 
     def _compute_kg_attention(self, e_entities_curr):
         """
