@@ -28,6 +28,7 @@ class T_AKDN_correct(nn.Module):
         self.n_layers = len(eval(args.conv_dim_list))
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
+        self.kge_l2loss_lambda = args.kge_l2loss_lambda
         
         self.entity_embed = nn.Embedding(self.n_entities, self.embed_dim)
         self.user_embed = nn.Embedding(self.n_users, self.embed_dim)
@@ -523,6 +524,35 @@ class T_AKDN_correct(nn.Module):
 
         return loss, g_lambda_out, layer_g_lambda_out
 
+    def _calc_kge_loss_chunk(self, h_batch, pt_batch, nt_batch, r_batch):
+        """
+        1バッチ分の KGE Loss 距離を計算。
+        checkpoint でラップされるため、中間テンソルは forward 後に解放される。
+        """
+        k = self.transr_dim
+        d = self.embed_dim
+        W_r = self.transr_proj.weight.view(self.n_relations, k, d)
+
+        e_r = F.normalize(self.relation_embed_k(r_batch), p=2, dim=-1, eps=1e-5)
+
+        n_batch = r_batch.size(0)
+        h_proj  = torch.zeros(n_batch, k, device=r_batch.device)
+        pt_proj = torch.zeros(n_batch, k, device=r_batch.device)
+        nt_proj = torch.zeros(n_batch, k, device=r_batch.device)
+
+        for r_id in r_batch.unique():
+            r_mask = (r_batch == r_id)
+            M_r = W_r[r_id]              # [k, d]
+            h_proj[r_mask]  = h_batch[r_mask]  @ M_r.T
+            pt_proj[r_mask] = pt_batch[r_mask] @ M_r.T
+            nt_proj[r_mask] = nt_batch[r_mask] @ M_r.T
+
+        # TransR距離 (次元正規化あり): ||h + r - t||^2 / k
+        pos_dist_batch = torch.sum((h_proj + e_r - pt_proj) ** 2, dim=-1) / k
+        neg_dist_batch = torch.sum((h_proj + e_r - nt_proj) ** 2, dim=-1) / k
+
+        return pos_dist_batch, neg_dist_batch
+
     def calc_kge_loss(self, h, r, pos_t, neg_t):
         """
         ★ KGE Pairwise Ranking Loss (TransR空間) - リレーションバッチ処理版
@@ -531,9 +561,8 @@ class T_AKDN_correct(nn.Module):
           L_KGE = mean( softplus( d(h,r,t) - d(h,r,t') ) )
 
         バッチ処理方針:
-          _compute_attention_chunk と同様に、transr_rel_batch_size 単位でリレーションを
-          ループし、各バッチ内でのみ投影行列 M_r を生成してメモリを節約する。
-          各バッチの距離を計算後に結合して損失を算出する。
+          _calc_kge_loss_chunk を用いて transr_rel_batch_size 単位でリレーションを
+          ループ処理し、checkpoint でラップすることで OOM を回避する。
 
         Args:
             h:     [B] head entity indices
@@ -541,8 +570,7 @@ class T_AKDN_correct(nn.Module):
             pos_t: [B] positive tail entity indices
             neg_t: [B] negative tail entity indices
         Returns:
-            kge_loss: scalar
-            l2_loss:  scalar (KGE用 L2 正則化、未加重)
+            loss: scalar (KGE Loss + L2 正則化)
         """
         k = self.transr_dim
         d = self.embed_dim
@@ -560,12 +588,8 @@ class T_AKDN_correct(nn.Module):
             _L2_loss_mean(nt_e)
         )
 
-        # TransR射影行列 [n_relations, k, d]
-        W_r = self.transr_proj.weight.view(self.n_relations, k, d)
-
-        # リレーションバッチごとに投影距離を計算して結合
-        pos_dist_all = torch.zeros(len(r), device=r.device)  # [B]
-        neg_dist_all = torch.zeros(len(r), device=r.device)  # [B]
+        all_pos_dist = []
+        all_neg_dist = []
 
         for r_start in range(0, self.n_relations, self.transr_rel_batch_size):
             r_end = min(r_start + self.transr_rel_batch_size, self.n_relations)
@@ -581,33 +605,24 @@ class T_AKDN_correct(nn.Module):
             pt_batch  = pt_e[mask] # [B_r, d]
             nt_batch  = nt_e[mask] # [B_r, d]
 
-            # リレーション埋め込み [B_r, k]
-            e_r = F.normalize(self.relation_embed_k(r_batch), p=2, dim=-1, eps=1e-5)
+            pos_dist_batch, neg_dist_batch = ckpt(
+                self._calc_kge_loss_chunk,
+                h_batch, pt_batch, nt_batch, r_batch,
+                use_reentrant=False
+            )
 
-            # 関係ごとに射影行列 M_r [k, d] を適用
-            # (メモリ節約のため、同一リレーション内でまとめて matmul)
-            n_batch = r_batch.size(0)
-            h_proj  = torch.zeros(n_batch, k, device=r.device)  # [B_r, k]
-            pt_proj = torch.zeros(n_batch, k, device=r.device)  # [B_r, k]
-            nt_proj = torch.zeros(n_batch, k, device=r.device)  # [B_r, k]
+            all_pos_dist.append(pos_dist_batch)
+            all_neg_dist.append(neg_dist_batch)
 
-            for r_id in r_batch.unique():
-                r_mask = (r_batch == r_id)   # [B_r] bool
-                M_r = W_r[r_id]              # [k, d]
-                h_proj[r_mask]  = h_batch[r_mask]  @ M_r.T  # [*, d] @ [d, k] → [*, k]
-                pt_proj[r_mask] = pt_batch[r_mask] @ M_r.T
-                nt_proj[r_mask] = nt_batch[r_mask] @ M_r.T
+        if len(all_pos_dist) > 0:
+            pos_dist_all = torch.cat(all_pos_dist)
+            neg_dist_all = torch.cat(all_neg_dist)
+            kge_loss = torch.mean(F.softplus(pos_dist_all - neg_dist_all))
+        else:
+            kge_loss = torch.tensor(0.0, device=r.device, requires_grad=True)
 
-            # TransR距離 (次元正規化あり): ||h + r - t||^2 / k  [B_r]
-            pos_dist_batch = torch.sum((h_proj + e_r - pt_proj) ** 2, dim=-1) / k
-            neg_dist_batch = torch.sum((h_proj + e_r - nt_proj) ** 2, dim=-1) / k
+        # L2正則化を内部で加重統合 (cf_l2loss_lambda と同様)
+        loss = kge_loss + self.kge_l2loss_lambda * l2_loss
 
-            # バッチ結果を全体テンソルに書き戻す
-            pos_dist_all[mask] = pos_dist_batch
-            neg_dist_all[mask] = neg_dist_batch
-
-        # Pairwise Ranking Loss: 正例距離 < 負例距離 となるよう最適化
-        kge_loss = torch.mean(F.softplus(pos_dist_all - neg_dist_all))
-
-        return kge_loss, l2_loss
+        return loss
 
