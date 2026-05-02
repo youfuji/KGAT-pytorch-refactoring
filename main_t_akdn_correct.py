@@ -184,39 +184,42 @@ def train(args):
         logging.info('CF Training: Epoch {:04d} Total Iter {:04d} | Total Time {:.1f}s | Iter Mean Loss {:.4f}'.format(epoch, n_batch, time() - time_cf, total_loss / n_batch))
         
         # ------------------------------------------------------------------
-        # 2. Train KGE (TransR Pairwise Ranking Loss)
+        # 2. Train KGE (TransR Pairwise Ranking Loss) every 3 epochs
         # ------------------------------------------------------------------
-        time_kge = time()
-        kge_total_loss = 0
-        n_kg_batch = data.n_kg_train // data.kg_batch_size + 1
+        if (epoch % 3) == 0:
+            time_kge = time()
+            kge_total_loss = 0
+            n_kg_batch = data.n_kg_train // data.kg_batch_size + 1
 
-        for iter in range(1, n_kg_batch + 1):
-            time_iter = time()
-            kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t = data.generate_kg_batch(
-                data.train_kg_dict, data.kg_batch_size, data.n_entities - 1
-            )
-            kg_batch_h     = kg_batch_h.to(device)
-            kg_batch_r     = kg_batch_r.to(device)
-            kg_batch_pos_t = kg_batch_pos_t.to(device)
-            kg_batch_neg_t = kg_batch_neg_t.to(device)
+            for iter in range(1, n_kg_batch + 1):
+                time_iter = time()
+                kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t = data.generate_kg_batch(
+                    data.train_kg_dict, data.kg_batch_size, data.n_entities - 1
+                )
+                kg_batch_h     = kg_batch_h.to(device)
+                kg_batch_r     = kg_batch_r.to(device)
+                kg_batch_pos_t = kg_batch_pos_t.to(device)
+                kg_batch_neg_t = kg_batch_neg_t.to(device)
 
-            # calc_loss と同じ呼び出しパターン: 単一スカラー loss を返す
-            batch_kge_loss = model('calc_kge_loss', kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t)
+                # calc_loss と同じ呼び出しパターン: 単一スカラー loss を返す
+                batch_kge_loss = model('calc_kge_loss', kg_batch_h, kg_batch_r, kg_batch_pos_t, kg_batch_neg_t)
 
-            if np.isnan(batch_kge_loss.cpu().detach().numpy()):
-                logging.info('ERROR (KGE Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_kg_batch))
-                sys.exit()
+                if np.isnan(batch_kge_loss.cpu().detach().numpy()):
+                    logging.info('ERROR (KGE Training): Epoch {:04d} Iter {:04d} / {:04d} Loss is nan.'.format(epoch, iter, n_kg_batch))
+                    sys.exit()
 
-            batch_kge_loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+                batch_kge_loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
-            kge_total_loss += batch_kge_loss.item()
+                kge_total_loss += batch_kge_loss.item()
 
-            if (iter % args.cf_print_every) == 0:
-                logging.info('KGE Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_kg_batch, time() - time_iter, batch_kge_loss.item(), kge_total_loss / iter))
+                if (iter % args.cf_print_every) == 0:
+                    logging.info('KGE Training: Epoch {:04d} Iter {:04d} / {:04d} | Time {:.1f}s | Iter Loss {:.4f} | Iter Mean Loss {:.4f}'.format(epoch, iter, n_kg_batch, time() - time_iter, batch_kge_loss.item(), kge_total_loss / iter))
 
-        logging.info('KGE Training: Epoch {:04d} Total Iter {:04d} | Time {:.1f}s | Iter Mean KGE Loss {:.4f}'.format(epoch, n_kg_batch, time() - time_kge, kge_total_loss / n_kg_batch))
+            logging.info('KGE Training: Epoch {:04d} Total Iter {:04d} | Time {:.1f}s | Iter Mean KGE Loss {:.4f}'.format(epoch, n_kg_batch, time() - time_kge, kge_total_loss / n_kg_batch))
+        else:
+            logging.info('KGE Training: Epoch {:04d} skipped (run every 3 epochs).'.format(epoch))
         logging.info('Epoch {:04d} finished | Total Time {:.1f}s'.format(epoch, time() - time0))
 
         # ------------------------------------------------------------------
