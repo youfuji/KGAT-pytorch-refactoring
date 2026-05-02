@@ -21,6 +21,8 @@ def parse_t_akdn_correct_args():
 
     parser.add_argument('--cf_batch_size', type=int, default=4096,
                         help='CF batch size.')
+    parser.add_argument('--kg_batch_size', type=int, default=4096,
+                        help='KGE batch size.')
     parser.add_argument('--test_batch_size', type=int, default=10000,
                         help='Test batch size (the user number to test every batch).')
 
@@ -41,6 +43,8 @@ def parse_t_akdn_correct_args():
 
     parser.add_argument('--cf_l2loss_lambda', type=float, default=1e-5,
                         help='Lambda when calculating CF l2 loss.')
+    parser.add_argument('--kge_l2loss_lambda', type=float, default=1e-5,
+                        help='Lambda when calculating KGE l2 loss.')
 
     parser.add_argument('--lr', type=float, default=0.0001,
                         help='Learning rate.')
