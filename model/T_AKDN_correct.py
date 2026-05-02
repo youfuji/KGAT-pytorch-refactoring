@@ -28,6 +28,7 @@ class T_AKDN_correct(nn.Module):
         self.n_layers = len(eval(args.conv_dim_list))
 
         self.cf_l2loss_lambda = args.cf_l2loss_lambda
+        self.kge_l2loss_lambda = args.kge_l2loss_lambda
         
         self.entity_embed = nn.Embedding(self.n_entities, self.embed_dim)
         self.user_embed = nn.Embedding(self.n_users, self.embed_dim)
@@ -452,6 +453,8 @@ class T_AKDN_correct(nn.Module):
             return self.calc_score(*input)
         if mode == 'calc_loss':
             return self.calc_loss(*input)
+        if mode == 'calc_kge_loss':
+            return self.calc_kge_loss(*input)
         if mode == 'update_att':
             return self.update_attention(*input)
 
@@ -480,3 +483,104 @@ class T_AKDN_correct(nn.Module):
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
         return cf_loss + self.cf_l2loss_lambda * l2_loss
         
+    def _calc_kge_loss_chunk(self, h_batch, pt_batch, nt_batch, r_batch):
+        """
+        1バッチ分の KGE Loss 距離を計算。
+        checkpoint でラップされるため、中間テンソルは forward 後に解放される。
+        """
+        k = self.transr_dim
+        d = self.embed_dim
+        W_r = self.transr_proj.weight.view(self.n_relations, k, d)
+
+        e_r = F.normalize(self.relation_embed_k(r_batch), p=2, dim=-1, eps=1e-5)
+
+        n_batch = r_batch.size(0)
+        h_proj  = torch.zeros(n_batch, k, device=r_batch.device)
+        pt_proj = torch.zeros(n_batch, k, device=r_batch.device)
+        nt_proj = torch.zeros(n_batch, k, device=r_batch.device)
+
+        for r_id in r_batch.unique():
+            r_mask = (r_batch == r_id)
+            M_r = W_r[r_id]              # [k, d]
+            h_proj[r_mask]  = h_batch[r_mask]  @ M_r.T
+            pt_proj[r_mask] = pt_batch[r_mask] @ M_r.T
+            nt_proj[r_mask] = nt_batch[r_mask] @ M_r.T
+
+        # TransR距離 (次元正規化あり): ||h + r - t||^2 / k
+        pos_dist_batch = torch.sum((h_proj + e_r - pt_proj) ** 2, dim=-1) / k
+        neg_dist_batch = torch.sum((h_proj + e_r - nt_proj) ** 2, dim=-1) / k
+
+        return pos_dist_batch, neg_dist_batch
+
+    def calc_kge_loss(self, h, r, pos_t, neg_t):
+        """
+        ★ KGE Pairwise Ranking Loss (TransR空間) - リレーションバッチ処理版
+        TransR投影を用いて正例トリプレットの距離が負例より小さくなるよう最適化:
+          L_KGE = mean( softplus( d(h,r,t) - d(h,r,t') ) )
+        バッチ処理方針:
+          _calc_kge_loss_chunk を用いて transr_rel_batch_size 単位でリレーションを
+          ループ処理し、checkpoint でラップすることで OOM を回避する。
+        Args:
+            h:     [B] head entity indices
+            r:     [B] relation indices
+            pos_t: [B] positive tail entity indices
+            neg_t: [B] negative tail entity indices
+        Returns:
+            loss: scalar (KGE Loss + L2 正則化)
+        """
+        k = self.transr_dim
+        d = self.embed_dim
+        all_embed = self.entity_embed.weight  # [n_entities, d]
+
+        # L2正規化 (Unit Sphere Constraint) - バッチ全体で一括正規化
+        h_raw  = all_embed[h]
+        pt_raw = all_embed[pos_t]
+        nt_raw = all_embed[neg_t]
+
+        h_e  = F.normalize(h_raw,  p=2, dim=-1, eps=1e-5)
+        pt_e = F.normalize(pt_raw, p=2, dim=-1, eps=1e-5)
+        nt_e = F.normalize(nt_raw, p=2, dim=-1, eps=1e-5)
+
+        l2_loss = (
+            _L2_loss_mean(h_raw) +
+            _L2_loss_mean(pt_raw) +
+            _L2_loss_mean(nt_raw)
+        )
+
+        all_pos_dist = []
+        all_neg_dist = []
+
+        for r_start in range(0, self.n_relations, self.transr_rel_batch_size):
+            r_end = min(r_start + self.transr_rel_batch_size, self.n_relations)
+
+            # このバッチに属するサンプルのマスク
+            mask = (r >= r_start) & (r < r_end)  # [B] bool
+            if not mask.any():
+                continue
+
+            # バッチ内インデックス
+            r_batch   = r[mask]    # [B_r]
+            h_batch   = h_e[mask]  # [B_r, d]
+            pt_batch  = pt_e[mask] # [B_r, d]
+            nt_batch  = nt_e[mask] # [B_r, d]
+
+            pos_dist_batch, neg_dist_batch = ckpt(
+                self._calc_kge_loss_chunk,
+                h_batch, pt_batch, nt_batch, r_batch,
+                use_reentrant=False
+            )
+
+            all_pos_dist.append(pos_dist_batch)
+            all_neg_dist.append(neg_dist_batch)
+
+        if len(all_pos_dist) > 0:
+            pos_dist_all = torch.cat(all_pos_dist)
+            neg_dist_all = torch.cat(all_neg_dist)
+            kge_loss = torch.mean(F.softplus(pos_dist_all - neg_dist_all))
+        else:
+            kge_loss = torch.tensor(0.0, device=r.device, requires_grad=True)
+
+        # L2正則化を内部で加重統合 (cf_l2loss_lambda と同様)
+        loss = kge_loss + self.kge_l2loss_lambda * l2_loss
+
+        return loss
