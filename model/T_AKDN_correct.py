@@ -414,6 +414,9 @@ class T_AKDN_correct(nn.Module):
             # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
             _mem_log("after fusion_gate")
+
+            if self.mess_dropout[i] > 0.0:
+                e_only_items_dual = F.dropout(e_only_items_dual, p=self.mess_dropout[i], training=self.training)
             
             # 4. IG User Aggregation (Eq. 6) - アイテム表現のみを使用
             e_users_new = self._ig_aggregation_user(e_only_items_dual)
@@ -421,7 +424,6 @@ class T_AKDN_correct(nn.Module):
             
             # 5. Message Dropout
             if self.mess_dropout[i] > 0.0:
-                 e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
             _mem_log("after dropout")
 
