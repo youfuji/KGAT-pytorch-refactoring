@@ -61,8 +61,12 @@ class T_AKDN_correct(nn.Module):
         self.W_dist = nn.Linear(self.transr_dim * 3, 1)
         nn.init.xavier_uniform_(self.W_dist.weight)
 
-        self.edge_gate_layer = nn.Linear(2, 1)
-        nn.init.xavier_uniform_(self.edge_gate_layer.weight)
+        self.edge_glu_value = nn.Linear(2, 1)
+        self.edge_glu_gate = nn.Linear(2, 1)
+        nn.init.xavier_uniform_(self.edge_glu_value.weight)
+        nn.init.xavier_uniform_(self.edge_glu_gate.weight)
+        nn.init.zeros_(self.edge_glu_value.bias)
+        nn.init.zeros_(self.edge_glu_gate.bias)
         self.sigmoid = nn.Sigmoid()
 
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -200,23 +204,21 @@ class T_AKDN_correct(nn.Module):
         # 新規追加: Edge-level Fusion Gate による最適ブレンド
         # ====================================================
         epsilon = 1e-8
-        
-        # 1. チャンク内でのZスコア正規化 (スケールを揃える)
+
         sem_norm = (s_sem - s_sem.mean()) / (s_sem.std(unbiased=False) + epsilon)
         dist_norm = (s_dist - s_dist.mean()) / (s_dist.std(unbiased=False) + epsilon)
-        
-        # 2. Gateネットワークへの入力作成 [E_chunk, 2]
-        g_lambda_input = torch.stack([sem_norm, dist_norm], dim=-1)
-        
-        # 3. 割合(g)の算出: 0.0 ~ 1.0
-        g_lambda = torch.sigmoid(self.edge_gate_layer(g_lambda_input)).squeeze(-1)
 
-        # チャンク内で集約して返す（ベクトルを外へ出さない）
-        g_lambda_sum = g_lambda.detach().sum()
-        g_lambda_count = g_lambda.new_tensor(float(g_lambda.numel())).detach()
+        x = torch.stack([sem_norm, dist_norm], dim=-1)          # [E_chunk, 2]
 
-        blended_score = g_lambda * sem_norm + (1.0 - g_lambda) * dist_norm
-        return blended_score, g_lambda_sum, g_lambda_count
+        value = self.edge_glu_value(x).squeeze(-1)              # [E_chunk]
+        gate = torch.sigmoid(self.edge_glu_gate(x)).squeeze(-1) # [E_chunk]
+
+        blended_score = value * gate                            # [E_chunk]
+
+        gate_sum = gate.detach().sum()
+        gate_count = gate.new_tensor(float(gate.numel())).detach()
+
+        return blended_score, gate_sum, gate_count
 
     def _compute_kg_attention(self, e_entities_curr):
         """
