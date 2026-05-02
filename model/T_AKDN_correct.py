@@ -579,15 +579,18 @@ class T_AKDN_correct(nn.Module):
         all_embed = self.entity_embed.weight  # [n_entities, d]
 
         # L2正規化 (Unit Sphere Constraint) - バッチ全体で一括正規化
-        h_e  = F.normalize(all_embed[h],     p=2, dim=-1, eps=1e-5)  # [B, d]
-        pt_e = F.normalize(all_embed[pos_t], p=2, dim=-1, eps=1e-5)  # [B, d]
-        nt_e = F.normalize(all_embed[neg_t], p=2, dim=-1, eps=1e-5)  # [B, d]
+        h_raw  = all_embed[h]
+        pt_raw = all_embed[pos_t]
+        nt_raw = all_embed[neg_t]
 
-        # L2 Regularization (L2正規化前の埋め込みを使用)
+        h_e  = F.normalize(h_raw,  p=2, dim=-1, eps=1e-5)
+        pt_e = F.normalize(pt_raw, p=2, dim=-1, eps=1e-5)
+        nt_e = F.normalize(nt_raw, p=2, dim=-1, eps=1e-5)
+
         l2_loss = (
-            _L2_loss_mean(h_e) +
-            _L2_loss_mean(pt_e) +
-            _L2_loss_mean(nt_e)
+            _L2_loss_mean(h_raw) +
+            _L2_loss_mean(pt_raw) +
+            _L2_loss_mean(nt_raw)
         )
 
         all_pos_dist = []
