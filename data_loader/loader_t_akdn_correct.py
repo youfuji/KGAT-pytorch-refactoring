@@ -16,6 +16,7 @@ class DataLoaderTAKDNCorrect(DataLoaderBase):
         super().__init__(args, logging)
         self.cf_batch_size = args.cf_batch_size
         self.test_batch_size = args.test_batch_size
+        self.kg_batch_size = args.kg_batch_size
 
         kg_data = self.load_kg(self.kg_file)
         self.construct_data(kg_data)
@@ -108,6 +109,44 @@ class DataLoaderTAKDNCorrect(DataLoaderBase):
         
         self.norm_adj_user_to_item = self.convert_coo2tensor(norm_adj_u2i.tocoo())
         self.norm_adj_item_to_user = self.convert_coo2tensor(norm_adj_i2u.tocoo())
+
+    def generate_kg_batch(self, kg_dict, batch_size, highest_neg_idx):
+        """
+        KGEトレーニング用バッチをサンプリングする。
+        Args:
+            kg_dict:         {h: [(t, r), ...]} の形式の辞書 (self.train_kg_dict)
+            batch_size:      バッチサイズ
+            highest_neg_idx: negative tail のサンプリング上限 (= n_entities - 1)
+        Returns:
+            batch_h:     [B] head entity indices
+            batch_r:     [B] relation indices
+            batch_pos_t: [B] positive tail entity indices
+            batch_neg_t: [B] negative tail entity indices (corrupt tail)
+        """
+        exist_heads = list(kg_dict.keys())
+        # head をランダムにバッチサイズ分サンプリング
+        if batch_size <= len(exist_heads):
+            heads = random.sample(exist_heads, batch_size)
+        else:
+            heads = [random.choice(exist_heads) for _ in range(batch_size)]
+
+        batch_h, batch_r, batch_pos_t, batch_neg_t = [], [], [], []
+        for h in heads:
+            # head に対応する (pos_t, r) のペアをランダムに1つ選択
+            pos_t, r = random.choice(kg_dict[h])
+            # negative tail: エンティティ全体からランダムサンプリング (corrupt tail)
+            neg_t = random.randint(0, highest_neg_idx)
+
+            batch_h.append(h)
+            batch_r.append(r)
+            batch_pos_t.append(pos_t)
+            batch_neg_t.append(neg_t)
+
+        batch_h     = torch.LongTensor(batch_h)
+        batch_r     = torch.LongTensor(batch_r)
+        batch_pos_t = torch.LongTensor(batch_pos_t)
+        batch_neg_t = torch.LongTensor(batch_neg_t)
+        return batch_h, batch_r, batch_pos_t, batch_neg_t
 
     def print_info(self, logging):
         logging.info('n_users:           %d' % self.n_users)
