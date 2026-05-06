@@ -53,6 +53,13 @@ class AKDN(nn.Module):
         self.W_b = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         nn.init.xavier_uniform_(self.W_a.weight)
         nn.init.xavier_uniform_(self.W_b.weight)
+
+        self.edge_glu_value = nn.Linear(2, 1)
+        self.edge_glu_gate = nn.Linear(2, 1)
+        nn.init.xavier_uniform_(self.edge_glu_value.weight)
+        nn.init.xavier_uniform_(self.edge_glu_gate.weight)
+        nn.init.zeros_(self.edge_glu_value.bias)
+        nn.init.zeros_(self.edge_glu_gate.bias)
         
         # IG用隣接行列 (LightGCN用, User-Item Bipartite)
         if ig_adj_user_to_item is not None:
@@ -210,20 +217,19 @@ class AKDN(nn.Module):
 
     def fusion_gate(self, kg_embed, ig_embed):
         """
-        Fusion Gate Mechanism (Eq. 4, 5) - Items Only
+        Fusion Gate Mechanism (GLU variant) - Items Only
         """
-        # Gate計算 g = sigmoid(W_a * kg + W_b * ig)
-        # Gate計算 g = sigmoid(W_a * kg + W_b * ig)
         term_kg = self.W_a(kg_embed)
         term_ig = self.W_b(ig_embed)
-        gate_input = term_kg + term_ig
+        stacked = torch.stack([term_kg, term_ig], dim=-1) # (N, dim, 2)
+        
+        candidate = self.edge_glu_value(stacked).squeeze(-1) # (N, dim)
+        gate_input = self.edge_glu_gate(stacked).squeeze(-1) # (N, dim)
         g = self.sigmoid(gate_input)
         
         if self.record_gate:
             self.gate_coefficients.append(g.detach().cpu())
             self.gate_inputs.append(gate_input.detach().cpu())
-            self.gate_wa_kg.append(term_kg.detach().cpu())
-            self.gate_wb_ig.append(term_ig.detach().cpu())
             self.gate_ig.append(ig_embed.detach().cpu())
             self.gate_kg.append(kg_embed.detach().cpu())
             
@@ -233,8 +239,8 @@ class AKDN(nn.Module):
         elif self.gate_control == 'ig_only':
             g = torch.zeros_like(g)
         
-        # 融合 e = g * kg + (1-g) * ig
-        fused_embed = g * kg_embed + (1 - g) * ig_embed
+        # 融合
+        fused_embed = candidate * g
         return fused_embed
 
     def _sparse_dropout(self, x, rate, noise_shape):
