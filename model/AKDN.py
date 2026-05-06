@@ -352,7 +352,7 @@ class AKDN(nn.Module):
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
 
             # ストック & 更新
-            item_dual_embeds_list.append(e_items_collab) # e_items_collabはアイテムのみ
+            item_dual_embeds_list.append(e_only_items_dual) # 融合後のアイテム表現を最終スコアに使用
             user_embeds_list.append(e_users_new)
             
             # 次の層への入力更新
