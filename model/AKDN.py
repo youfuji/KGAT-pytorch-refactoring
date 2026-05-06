@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 def _L2_loss_mean(x):
     return torch.mean(torch.sum(torch.pow(x, 2), dim=1, keepdim=False) / 2.)
@@ -296,6 +297,12 @@ class AKDN(nn.Module):
         e_users_new = torch.sparse.mm(adj_i2u, e_items_dual)
         return e_users_new
 
+    def _item_attention(self, query_embed, key_value_embed):
+        attention_scores = torch.matmul(query_embed, key_value_embed.transpose(0, 1))
+        attention_scores = attention_scores / math.sqrt(query_embed.size(1))
+        attention_weights = F.softmax(attention_scores, dim=1)
+        return torch.matmul(attention_weights, key_value_embed)
+
     def get_embeddings(self):
         """
         AKDNのメインループ (L層の伝播と融合)
@@ -342,17 +349,18 @@ class AKDN(nn.Module):
             
             # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
+            e_only_items_att = self._item_attention(e_only_items_collab, e_only_items_dual)
             
             # 4. IG User Aggregation (Eq. 6) - アイテム表現のみを使用
             e_users_new = self._ig_aggregation_user(e_only_items_dual)
             
             # 5. Message Dropout
             if self.mess_dropout[i] > 0.0:
-                 e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
+                 e_only_items_att = F.dropout(e_only_items_att, p=self.mess_dropout[i], training=self.training)
                  e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
 
             # ストック & 更新
-            item_dual_embeds_list.append(e_items_collab) # e_items_collabはアイテムのみ
+            item_dual_embeds_list.append(e_only_items_att)
             user_embeds_list.append(e_users_new)
             
             # 次の層への入力更新
