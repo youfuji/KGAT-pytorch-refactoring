@@ -349,7 +349,7 @@ class AKDN(nn.Module):
             
             # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
-            e_only_items_att = self._item_attention(e_only_items_collab, e_only_items_dual)
+            e_only_items_att = self._item_attention(e_only_items_dual, e_only_items_collab)
             
             # 4. IG User Aggregation (Eq. 6) - アイテム表現のみを使用
             e_users_new = self._ig_aggregation_user(e_only_items_dual)
