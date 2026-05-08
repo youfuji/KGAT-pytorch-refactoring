@@ -34,7 +34,7 @@ def evaluate(model, dataloader, Ks, device):
     item_ids = torch.arange(n_items, dtype=torch.long).to(device)
 
     cf_scores = []
-    metric_names = ['precision', 'recall', 'ndcg']
+    metric_names = ['recall', 'ndcg']
     metrics_dict = {k: {m: [] for m in metric_names} for k in Ks}
 
     with tqdm(total=len(user_ids_batches), desc='Evaluating Iteration') as pbar:
@@ -68,8 +68,13 @@ def train(args):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
-    log_save_id = create_log_id(args.save_dir)
-    logging_config(folder=args.save_dir, name='log{:d}'.format(log_save_id), no_console=False)
+    # Set up directory for this run
+    log_save_id = 0
+    while os.path.exists(os.path.join(args.save_dir, 'log{:d}'.format(log_save_id))):
+        log_save_id += 1
+    args.save_dir = os.path.join(args.save_dir, 'log{:d}/'.format(log_save_id))
+    
+    logging_config(folder=args.save_dir, name='log', no_console=False)
     logging.info(args)
 
     # GPU / CPU
@@ -88,7 +93,8 @@ def train(args):
     # construct model & optimizer
     # AKDNには IG用の隣接行列(norm_adj_mat) を渡す
     model = AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, 
-                 A_in=data.norm_adj_mat, 
+                 ig_adj_user_to_item=data.norm_adj_user_to_item,
+                 ig_adj_item_to_user=data.norm_adj_item_to_user,
                  user_pre_embed=user_pre_embed, 
                  item_pre_embed=item_pre_embed,
                  edge_dropout_rate=args.edge_dropout_rate)
@@ -115,7 +121,7 @@ def train(args):
     k_max = max(Ks)
 
     epoch_list = []
-    metrics_list = {k: {'precision': [], 'recall': [], 'ndcg': []} for k in Ks}
+    metrics_list = {k: {'recall': [], 'ndcg': []} for k in Ks}
 
     # train model
     for epoch in range(1, args.n_epoch + 1):
@@ -160,12 +166,12 @@ def train(args):
         if (epoch % args.evaluate_every) == 0 or epoch == args.n_epoch:
             time_eval = time()
             _, metrics_dict = evaluate(model, data, Ks, device)
-            logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-                epoch, time() - time_eval, metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+            logging.info('CF Evaluation: Epoch {:04d} | Total Time {:.1f}s | Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
+                epoch, time() - time_eval, metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
 
             epoch_list.append(epoch)
             for k in Ks:
-                for m in ['precision', 'recall', 'ndcg']:
+                for m in ['recall', 'ndcg']:
                     metrics_list[k][m].append(metrics_dict[k][m])
             best_recall, should_stop = early_stopping(metrics_list[k_min]['recall'], args.stopping_steps)
 
@@ -181,17 +187,17 @@ def train(args):
     metrics_df = [epoch_list]
     metrics_cols = ['epoch_idx']
     for k in Ks:
-        for m in ['precision', 'recall', 'ndcg']:
+        for m in ['recall', 'ndcg']:
             metrics_df.append(metrics_list[k][m])
             metrics_cols.append('{}@{}'.format(m, k))
     metrics_df = pd.DataFrame(metrics_df).transpose()
     metrics_df.columns = metrics_cols
-    metrics_df.to_csv(args.save_dir + '/metrics.tsv', sep='\t', index=False)
+    metrics_df.to_csv(os.path.join(args.save_dir, 'metrics.tsv'), sep='\t', index=False)
 
     # print best metrics
     best_metrics = metrics_df.loc[metrics_df['epoch_idx'] == best_epoch].iloc[0].to_dict()
-    logging.info('Best CF Evaluation: Epoch {:04d} | Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-        int(best_metrics['epoch_idx']), best_metrics['precision@{}'.format(k_min)], best_metrics['precision@{}'.format(k_max)], best_metrics['recall@{}'.format(k_min)], best_metrics['recall@{}'.format(k_max)], best_metrics['ndcg@{}'.format(k_min)], best_metrics['ndcg@{}'.format(k_max)]))
+    logging.info('Best CF Evaluation: Epoch {:04d} | Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
+        int(best_metrics['epoch_idx']), best_metrics['recall@{}'.format(k_min)], best_metrics['recall@{}'.format(k_max)], best_metrics['ndcg@{}'.format(k_min)], best_metrics['ndcg@{}'.format(k_max)]))
 
 
 def predict(args):
@@ -202,7 +208,9 @@ def predict(args):
     data = DataLoaderAKDN(args, logging)
 
     # load model
-    model = AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, A_in=data.norm_adj_mat)
+    model = AKDN(args, data.n_users, data.n_items, data.n_entities, data.n_relations, 
+                 ig_adj_user_to_item=data.norm_adj_user_to_item,
+                 ig_adj_item_to_user=data.norm_adj_item_to_user)
     model = load_model(model, args.pretrain_model_path)
     model.to(device)
 
@@ -212,9 +220,9 @@ def predict(args):
     k_max = max(Ks)
 
     cf_scores, metrics_dict = evaluate(model, data, Ks, device)
-    np.save(args.save_dir + 'cf_scores.npy', cf_scores)
-    print('CF Evaluation: Precision [{:.4f}, {:.4f}], Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
-        metrics_dict[k_min]['precision'], metrics_dict[k_max]['precision'], metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
+    np.save(os.path.join(args.save_dir, 'cf_scores.npy'), cf_scores)
+    print('CF Evaluation: Recall [{:.4f}, {:.4f}], NDCG [{:.4f}, {:.4f}]'.format(
+        metrics_dict[k_min]['recall'], metrics_dict[k_max]['recall'], metrics_dict[k_min]['ndcg'], metrics_dict[k_max]['ndcg']))
 
 
 if __name__ == '__main__':

@@ -33,26 +33,10 @@ class DataLoaderAKDN(DataLoaderBase):
         inverse_kg_data['r'] += n_relations
         kg_data = pd.concat([kg_data, inverse_kg_data], axis=0, ignore_index=True, sort=False)
 
-        # ユーザーIDのリマッピング（Entity IDとの衝突回避）
-        # AKDNでもEmbeddingテーブルを共有する場合に備え、ID空間を分けて管理します
-        # 0 ~ n_entities-1 : Entity (Item含む)
-        # n_entities ~     : User
         self.n_relations = max(kg_data['r']) + 1
         self.n_entities = max(max(kg_data['h']), max(kg_data['t'])) + 1
-        self.n_users_entities = self.n_users + self.n_entities
-
-        # CFデータのIDシフト (User ID += n_entities)
-        self.cf_train_data = (
-            np.array(list(map(lambda d: d + self.n_entities, self.cf_train_data[0]))).astype(np.int32),
-            self.cf_train_data[1].astype(np.int32)
-        )
-        self.cf_test_data = (
-            np.array(list(map(lambda d: d + self.n_entities, self.cf_test_data[0]))).astype(np.int32),
-            self.cf_test_data[1].astype(np.int32)
-        )
-
-        self.train_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.train_user_dict.items()}
-        self.test_user_dict = {k + self.n_entities: np.unique(v).astype(np.int32) for k, v in self.test_user_dict.items()}
+        # IDシフトの廃止: User IDは純粋に 0 ~ n_users-1 として扱う
+        # cf_train_data などのシフト(+self.n_entities)を削除しました。
 
         # [変更点]: KGATとは異なり、ここでCFデータをKGデータに統合しません。
         # AKDNではKGとIGを分離して扱うため、kg_train_dataは純粋なKnowledge Graphのみとします。
@@ -94,49 +78,41 @@ class DataLoaderAKDN(DataLoaderBase):
         AKDNのCollaborative Part (LightGCN) のための正規化隣接行列を作成します。
         Interaction Graph (User-Item Bipartite Graph) のみを使用します。
         """
-        # User-Item Interaction Matrixの作成
-        # row: User (shifted ID), col: Item (original ID)
-        # Note: self.train_user_dict keys are already shifted by n_entities
-        
-        # 疎行列の構築に必要なリスト
-        rows = []
-        cols = []
-        
+        # User -> Item の二部グラフのみを作成 (サイズ: n_entities x n_users)
+        rows = [] # Entity (Item) ids
+        cols = [] # User ids
+        vals = []
         for u_id, items in self.train_user_dict.items():
-            rows.extend([u_id] * len(items))
-            cols.extend(items)
+            # u_id はシフトしていない生の 0 ~ n_users-1
+            cols.extend([u_id] * len(items))
+            rows.extend(items)
+            vals.extend([1.] * len(items))
+
+        adj_u2i = sp.coo_matrix((vals, (rows, cols)), shape=(self.n_items, self.n_users))
+        adj_i2u = adj_u2i.T
+
+        # それぞれの行（出次数）で正規化
+        user_deg = np.array(adj_u2i.sum(axis=0)).flatten()
+        item_deg = np.array(adj_u2i.sum(axis=1)).flatten()
         
-        # Adjacency Matrix A の構築
-        # サイズ: (n_users + n_entities) x (n_users + n_entities)
-        # 構造: | 0   R |
-        #       | R^T 0 |
-        # User領域とItem領域(Entity領域の一部)の相互作用
+        d_u_inv = np.power(user_deg, -0.5)
+        d_u_inv[np.isinf(d_u_inv)] = 0.
+        d_i_inv = np.power(item_deg, -0.5)
+        d_i_inv[np.isinf(d_i_inv)] = 0.
         
-        vals = [1.] * len(rows)
+        D_u = sp.diags(d_u_inv)
+        D_i = sp.diags(d_i_inv)
         
-        # R (User -> Item)
-        adj_mat = sp.coo_matrix((vals, (rows, cols)), 
-                                shape=(self.n_users_entities, self.n_users_entities))
+        norm_adj_u2i = D_i.dot(adj_u2i).dot(D_u)
+        norm_adj_i2u = D_u.dot(adj_i2u).dot(D_i)
         
-        # R^T (Item -> User)
-        adj_mat = adj_mat + adj_mat.T
-        
-        # 正規化 (D^-1/2 * A * D^-1/2)
-        rowsum = np.array(adj_mat.sum(axis=1))
-        d_inv_sqrt = np.power(rowsum, -0.5).flatten()
-        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
-        d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
-        
-        norm_adj_mat = d_mat_inv_sqrt.dot(adj_mat).dot(d_mat_inv_sqrt)
-        
-        # Sparse Tensorに変換して保存
-        self.norm_adj_mat = self.convert_coo2tensor(norm_adj_mat.tocoo())
+        self.norm_adj_user_to_item = self.convert_coo2tensor(norm_adj_u2i.tocoo())
+        self.norm_adj_item_to_user = self.convert_coo2tensor(norm_adj_i2u.tocoo())
 
     def print_info(self, logging):
         logging.info('n_users:           %d' % self.n_users)
         logging.info('n_items:           %d' % self.n_items)
         logging.info('n_entities:        %d' % self.n_entities)
-        logging.info('n_users_entities:  %d' % self.n_users_entities)
         logging.info('n_relations:       %d' % self.n_relations)
 
         logging.info('n_h_list:          %d' % len(self.h_list))
