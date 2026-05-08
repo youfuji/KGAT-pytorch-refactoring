@@ -334,16 +334,18 @@ class AKDN(nn.Module):
             e_only_items_kg = e_items_kg[:self.n_items]
             e_only_items_collab = e_items_collab[:self.n_items]
             
-            # アイテムはKG表現とIG表現を融合
+           # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
             
+            if self.mess_dropout[i] > 0.0:
+                e_only_items_dual = F.dropout(e_only_items_dual, p=self.mess_dropout[i], training=self.training)
+
             # 4. IG User Aggregation (Eq. 6) - アイテム表現のみを使用
             e_users_new = self._ig_aggregation_user(e_only_items_dual)
             
             # 5. Message Dropout
             if self.mess_dropout[i] > 0.0:
-                 e_items_collab = F.dropout(e_items_collab, p=self.mess_dropout[i], training=self.training)
-                 e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
+                e_users_new = F.dropout(e_users_new, p=self.mess_dropout[i], training=self.training)
 
             # ストック & 更新
             item_dual_embeds_list.append(e_items_collab) # e_items_collabはアイテムのみ
