@@ -9,8 +9,8 @@ import pandas as pd
 import torch
 
 from data_loader.loader_akdn import DataLoaderAKDN
-from model.T_AKDN import T_AKDN
-from parser.parser_t_akdn import parse_t_akdn_args
+from model.T_AKDN_correct import T_AKDN_correct
+from parser.parser_t_akdn_correct import parse_t_akdn_correct_args
 from utils.metrics import compute_attention_diagnostics_from_alpha
 from utils.model_helper import load_model
 
@@ -36,7 +36,7 @@ def parse_attention_args():
 
     local_args, remaining_argv = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining_argv
-    base_args = parse_t_akdn_args()
+    base_args = parse_t_akdn_correct_args()
 
     if local_args.save_dir:
         base_args.save_dir = local_args.save_dir
@@ -105,27 +105,26 @@ def plot_histogram(values, title, xlabel, save_path, color):
 
 
 def plot_scatter(record, save_path, max_edges):
-    total_edges = record['sem'].numel()
+    """Scatter plot of attention_value vs alpha."""
+    total_edges = record['attention_value'].numel()
     if total_edges == 0:
         return
 
     sample_size = min(total_edges, max_edges)
     if sample_size < total_edges:
         perm = torch.randperm(total_edges)[:sample_size]
-        sem = record['sem'][perm].numpy()
-        dist = record['dist'][perm].numpy()
+        attn_val = record['attention_value'][perm].numpy()
         alpha = record['alpha'][perm].numpy()
     else:
-        sem = record['sem'].numpy()
-        dist = record['dist'].numpy()
+        attn_val = record['attention_value'].numpy()
         alpha = record['alpha'].numpy()
 
     plt.figure(figsize=(9, 7))
-    scatter = plt.scatter(sem, dist, c=alpha, s=10, alpha=0.55, cmap='viridis')
+    scatter = plt.scatter(attn_val, alpha, c=alpha, s=10, alpha=0.55, cmap='viridis')
     plt.colorbar(scatter, label='alpha')
-    plt.title('Layer {}: sem vs dist'.format(record['layer'] + 1))
-    plt.xlabel('sem')
-    plt.ylabel('dist')
+    plt.title('Layer {}: attention_value vs alpha'.format(record['layer'] + 1))
+    plt.xlabel('attention_value (pre-softmax logit)')
+    plt.ylabel('alpha (post-softmax)')
     plt.grid(True, alpha=0.25)
     plt.tight_layout()
     plt.savefig(save_path)
@@ -140,23 +139,17 @@ def plot_item_edges(record, item_id, top_k, save_path):
     df = pd.DataFrame({
         'tail': record['t'][item_mask].numpy(),
         'relation': record['r'][item_mask].numpy(),
-        'sem': record['sem'][item_mask].numpy(),
-        'sem_tilde': record['sem_tilde'][item_mask].numpy(),
-        'dist': record['dist'][item_mask].numpy(),
-        'd_tilde_neg': record['d_tilde_neg'][item_mask].numpy(),
+        'attention_value': record['attention_value'][item_mask].numpy(),
         'alpha': record['alpha'][item_mask].numpy(),
     }).sort_values('alpha', ascending=False).head(top_k)
 
     labels = ['t{}|r{}'.format(int(t), int(r)) for t, r in zip(df['tail'], df['relation'])]
     x = np.arange(len(df))
-    width = 0.16
+    width = 0.35
 
     plt.figure(figsize=(max(8, len(df) * 1.4), 6))
-    plt.bar(x - 2.0 * width, df['sem'], width=width, label='sem', color='tab:blue')
-    plt.bar(x - 1.0 * width, df['sem_tilde'], width=width, label='sem_tilde', color='tab:purple')
-    plt.bar(x + 0.0 * width, df['dist'], width=width, label='dist', color='tab:orange')
-    plt.bar(x + 1.0 * width, df['d_tilde_neg'], width=width, label='d_tilde_neg', color='tab:green')
-    plt.bar(x + 2.0 * width, df['alpha'], width=width, label='alpha', color='tab:red')
+    plt.bar(x - 0.5 * width, df['attention_value'], width=width, label='attention_value', color='tab:blue')
+    plt.bar(x + 0.5 * width, df['alpha'], width=width, label='alpha', color='tab:red')
     plt.xticks(x, labels, rotation=45, ha='right')
     plt.title('Layer {}: item {} top-{} edges'.format(record['layer'] + 1, item_id, len(df)))
     plt.ylabel('Value')
@@ -173,10 +166,7 @@ def export_layer_tables(record, save_dir, top_k):
         'head_item': record['h'].numpy(),
         'tail_entity': record['t'].numpy(),
         'relation': record['r'].numpy(),
-        'sem': record['sem'].numpy(),
-        'sem_tilde': record['sem_tilde'].numpy(),
-        'dist': record['dist'].numpy(),
-        'd_tilde_neg': record['d_tilde_neg'].numpy(),
+        'attention_value': record['attention_value'].numpy(),
         'alpha': record['alpha'].numpy(),
     })
     layer_df.to_csv(os.path.join(save_dir, 'layer_{}_edges.csv'.format(record['layer'] + 1)), index=False)
@@ -243,13 +233,14 @@ def main():
         user_pre_embed, item_pre_embed = None, None
 
     logging.info('Initializing model...')
-    model = T_AKDN(
+    model = T_AKDN_correct(
         args,
         data.n_users,
         data.n_items,
         data.n_entities,
         data.n_relations,
-        A_in=data.norm_adj_mat,
+        ig_adj_user_to_item=data.norm_adj_user_to_item,
+        ig_adj_item_to_user=data.norm_adj_item_to_user,
         user_pre_embed=user_pre_embed,
         item_pre_embed=item_pre_embed,
         edge_dropout_rate=0.0,
@@ -284,11 +275,9 @@ def main():
     focus_items = collect_focus_items(records, local_args)
     logging.info('Focus items: %s', focus_items)
 
+    # T_AKDN_correct records: attention_value (pre-softmax) and alpha (post-softmax)
     colors = {
-        'sem': 'tab:blue',
-        'sem_tilde': 'tab:purple',
-        'dist': 'tab:orange',
-        'd_tilde_neg': 'tab:green',
+        'attention_value': 'tab:blue',
         'alpha': 'tab:red',
     }
 
@@ -330,7 +319,7 @@ def main():
 
         plot_scatter(
             record,
-            os.path.join(layer_dir, 'sem_vs_dist_scatter.png'),
+            os.path.join(layer_dir, 'attn_value_vs_alpha_scatter.png'),
             max_edges=local_args.max_edges,
         )
         export_layer_tables(record, layer_dir, local_args.top_k)
