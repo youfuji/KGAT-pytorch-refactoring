@@ -44,7 +44,7 @@ class AKDN(nn.Module):
         
         # 1. KG Attention用パラメータ (Eq. 2)
         # W_k: (d || d) -> d  (連結を入力とする)
-        self.W_k = nn.Linear(self.embed_dim * 2, self.relation_dim)
+        self.W_k = nn.Linear(self.embed_dim, self.relation_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
         
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -175,14 +175,14 @@ class AKDN(nn.Module):
         r_embed = self.relation_embed(self.r_list)
         
         # 2. Attention Score (Eq. 2)
-        # alpha = LeakyReLU( W_k([e_t || e_h]) * r ) -> sum
+        # alpha = LeakyReLU( W_k(e_t ⊙ e_h) * r ) -> sum
         # Note: AKDNの実装において、Tailが近傍(neighbors)、Headが中心とする
         
-        # Concatenate: (n_edges, 2 * dim)
-        cat_embed = torch.cat([t_embed, h_embed], dim=1)
+        # Element-wise Product: (n_edges, dim)
+        elem_embed = t_embed * h_embed
         
         # Linear Transform: (n_edges, dim)
-        trans_embed = self.W_k(cat_embed)
+        trans_embed = self.W_k(elem_embed)
         
         # Interaction with Relation: (n_edges, dim) -> (n_edges, )
         attention_logits = torch.sum(trans_embed * r_embed, dim=1)
