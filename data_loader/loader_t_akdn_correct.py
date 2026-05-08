@@ -113,6 +113,7 @@ class DataLoaderTAKDNCorrect(DataLoaderBase):
     def generate_kg_batch(self, kg_dict, batch_size, highest_neg_idx):
         """
         KGEトレーニング用バッチをサンプリングする。
+        negative tail は真のトリプレット (h, r, neg_t) が存在しないことを保証する。
         Args:
             kg_dict:         {h: [(t, r), ...]} の形式の辞書 (self.train_kg_dict)
             batch_size:      バッチサイズ
@@ -131,16 +132,31 @@ class DataLoaderTAKDNCorrect(DataLoaderBase):
             heads = [random.choice(exist_heads) for _ in range(batch_size)]
 
         batch_h, batch_r, batch_pos_t, batch_neg_t = [], [], [], []
+        n_collisions = 0
         for h in heads:
             # head に対応する (pos_t, r) のペアをランダムに1つ選択
             pos_t, r = random.choice(kg_dict[h])
-            # negative tail: エンティティ全体からランダムサンプリング (corrupt tail)
-            neg_t = random.randint(0, highest_neg_idx)
+            
+            # negative tail: 真のトリプレットを除外してサンプリング
+            pos_triples = kg_dict[h]  # list of (t, r)
+            max_retries = 50
+            for _ in range(max_retries):
+                neg_t = random.randint(0, highest_neg_idx)
+                # (neg_t, r) が正例トリプレットに含まれていない & pos_tとも異なることを確認
+                if neg_t != pos_t and (neg_t, r) not in pos_triples:
+                    break
+                n_collisions += 1
+            # max_retries に達した場合はそのまま使用 (非常に稀)
 
             batch_h.append(h)
             batch_r.append(r)
             batch_pos_t.append(pos_t)
             batch_neg_t.append(neg_t)
+
+        # 衝突率をログ出力 (デバッグ用: 初回バッチのみ表示するには呼び出し側で制御)
+        if n_collisions > 0:
+            print(f"[KG Neg Sampling] collisions={n_collisions}/{batch_size} "
+                  f"({100*n_collisions/batch_size:.1f}%)")
 
         batch_h     = torch.LongTensor(batch_h)
         batch_r     = torch.LongTensor(batch_r)
