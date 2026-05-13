@@ -60,8 +60,9 @@ class T_AKDN_correct(nn.Module):
         self.W_dist = nn.Linear(self.transr_dim * 3, 1)
         nn.init.xavier_uniform_(self.W_dist.weight)
 
-        self.attn_lambda = getattr(args, 'attn_lambda', 1.0)
-        
+        self.edge_gate_layer = nn.Linear(2, 1)
+        nn.init.xavier_uniform_(self.edge_gate_layer.weight)
+        self.sigmoid = nn.Sigmoid()
 
         # 2. Fusion Gate用パラメータ (Eq. 4)
         # Gateはアイテムに対してのみ適用される
@@ -102,6 +103,8 @@ class T_AKDN_correct(nn.Module):
         # デバッグ: 最初の呼び出し時のみループ回数を出力
         self._loop_debug_printed = False
         self._memory_debug_printed = False
+        self.last_g_lambda = None
+        self.last_layer_g_lambda = None
 
 
 
@@ -162,12 +165,6 @@ class T_AKDN_correct(nn.Module):
         
         射影行列 M_r は関係ごとに共有されるため、bmm の代わりに
         関係ごとの matmul を用い、M_chunk [E_chunk, k, d] の生成を回避する。
-        
-        Args:
-            e_entities_curr: [N, d] 全エンティティ埋め込み
-            edge_indices: [E_chunk] このバッチで処理するエッジのインデックス
-        Returns:
-            scores: [E_chunk] attention logits (スカラー)
         """
         device = e_entities_curr.device
         r_chunk = self.r_list[edge_indices]
@@ -178,28 +175,47 @@ class T_AKDN_correct(nn.Module):
         t_chunk = F.normalize(e_entities_curr[self.t_list[edge_indices]], p=2, dim=-1)  # [E_chunk, d]
         
         # 関係ごとに matmul: M_r [k, d] を1つだけ使用
-        # (従来: M_chunk = W_r[r_chunk] → [E_chunk, k, d] ≈ 6.7GB をここで回避)
         n_chunk = len(edge_indices)
         e_ir = torch.zeros(n_chunk, self.transr_dim, device=device)
         e_vr = torch.zeros(n_chunk, self.transr_dim, device=device)
         
         for r in r_chunk.unique():
             r_mask = (r_chunk == r)
-            M_r = W_r[r]                            # [k, d] — 16KB のみ
+            M_r = W_r[r]                            # [k, d]
             e_ir[r_mask] = h_chunk[r_mask] @ M_r.T  # [E_r, d] @ [d, k] → [E_r, k]
             e_vr[r_mask] = t_chunk[r_mask] @ M_r.T
         
-        e_r = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                # [E_chunk, k]
+        e_r = F.normalize(self.relation_embed_k(r_chunk), p=2, dim=-1)                 # [E_chunk, k]
         
-        # Semantic Score
+        # Semantic Score (値が大きいほど良い)
         cat_sem = torch.cat([e_vr, e_ir], dim=-1)                                      # [E_chunk, 2k]
         s_sem = self.leakyrelu(torch.sum(self.W_sem(cat_sem) * e_r, dim=-1))           # [E_chunk]
         
-        # Distance Score
+        # Distance Score (MLP出力なので、値が大きいほど良いと仮定)
         cat_dist = torch.cat([e_ir, e_r, e_vr], dim=-1)                                # [E_chunk, 3k]
         s_dist = self.leakyrelu(self.W_dist(cat_dist).squeeze(-1))                     # [E_chunk]
         
-        return s_sem + self.attn_lambda * s_dist
+        # ====================================================
+        # 新規追加: Edge-level Fusion Gate による最適ブレンド
+        # ====================================================
+        epsilon = 1e-8
+        
+        # 1. チャンク内でのZスコア正規化 (スケールを揃える)
+        sem_norm = (s_sem - s_sem.mean()) / (s_sem.std(unbiased=False) + epsilon)
+        dist_norm = (s_dist - s_dist.mean()) / (s_dist.std(unbiased=False) + epsilon)
+        
+        # 2. Gateネットワークへの入力作成 [E_chunk, 2]
+        g_lambda_input = torch.stack([sem_norm, dist_norm], dim=-1)
+        
+        # 3. 割合(g)の算出: 0.0 ~ 1.0
+        g_lambda = torch.sigmoid(self.edge_gate_layer(g_lambda_input)).squeeze(-1)
+
+        # チャンク内で集約して返す（ベクトルを外へ出さない）
+        g_lambda_sum = g_lambda.detach().sum()
+        g_lambda_count = g_lambda.new_tensor(float(g_lambda.numel())).detach()
+
+        blended_score = g_lambda * sem_norm + (1.0 - g_lambda) * dist_norm
+        return blended_score, g_lambda_sum, g_lambda_count
 
     def _compute_kg_attention(self, e_entities_curr):
         """
@@ -212,6 +228,8 @@ class T_AKDN_correct(nn.Module):
         
         all_scores = []
         all_indices = []
+        g_lambda_sum = torch.zeros(1, device=device)
+        g_lambda_count = torch.zeros(1, device=device)
         
         n_loop_total = 0
         n_loop_active = 0
@@ -229,7 +247,7 @@ class T_AKDN_correct(nn.Module):
             
             # 各バッチを独立に checkpoint: 中間テンソル [E_chunk, k, d] 等は
             # このバッチの計算完了後に解放され、backward 時に再計算される
-            chunk_scores = ckpt(
+            chunk_scores, chunk_g_lambda_sum, chunk_g_lambda_count = ckpt(
                 self._compute_attention_chunk,
                 e_entities_curr, edge_indices,
                 use_reentrant=False
@@ -237,6 +255,8 @@ class T_AKDN_correct(nn.Module):
             
             all_scores.append(chunk_scores)
             all_indices.append(edge_indices)
+            g_lambda_sum = g_lambda_sum + chunk_g_lambda_sum
+            g_lambda_count = g_lambda_count + chunk_g_lambda_count
         
         # out-of-place で組み立て（autograd フレンドリー）
         scores = torch.cat(all_scores)
@@ -266,7 +286,8 @@ class T_AKDN_correct(nn.Module):
                 'alpha': alpha[item_edge_mask].detach().cpu(),
             })
         
-        return alpha  # [E]
+        g_lambda_mean = g_lambda_sum / torch.clamp(g_lambda_count, min=1.0)
+        return alpha, g_lambda_mean.squeeze(0)  # [E], scalar
 
 
 
@@ -382,6 +403,8 @@ class T_AKDN_correct(nn.Module):
         if self.record_attention:
             self.attention_records = []
 
+        layer_g_lambda_means = []
+
         _do_mem_log = (not self._memory_debug_printed) and e_entities_curr.is_cuda
         def _mem_log(label):
             if not _do_mem_log:
@@ -396,7 +419,8 @@ class T_AKDN_correct(nn.Module):
                 _mem_log("layer_start")
 
             # KG Attention + Aggregation
-            alpha = self._compute_kg_attention(e_entities_curr)
+            alpha, g_lambda_mean = self._compute_kg_attention(e_entities_curr)
+            layer_g_lambda_means.append(g_lambda_mean)
             _mem_log("after _compute_kg_attention")
 
             # 1. KG Aggregation (Eq. 1)
@@ -439,6 +463,13 @@ class T_AKDN_correct(nn.Module):
 
         if _do_mem_log:
             self._memory_debug_printed = True
+
+        if layer_g_lambda_means:
+            self.last_layer_g_lambda = torch.stack(layer_g_lambda_means).detach()
+            self.last_g_lambda = self.last_layer_g_lambda.mean()
+        else:
+            self.last_g_lambda = None
+            self.last_layer_g_lambda = None
             
 
         # 最終表現 (Eq. 7)
@@ -478,5 +509,17 @@ class T_AKDN_correct(nn.Module):
         
         # L2 Regularization (Eq. 10)
         l2_loss = _L2_loss_mean(user_embed) + _L2_loss_mean(pos_embed) + _L2_loss_mean(neg_embed)
-        return cf_loss + self.cf_l2loss_lambda * l2_loss
+        loss = cf_loss + self.cf_l2loss_lambda * l2_loss
+
+        if self.last_g_lambda is None:
+            g_lambda_out = torch.tensor(float('nan'), device=loss.device)
+        else:
+            g_lambda_out = self.last_g_lambda.to(loss.device)
+
+        if self.last_layer_g_lambda is None:
+            layer_g_lambda_out = torch.full((self.n_layers,), float('nan'), device=loss.device)
+        else:
+            layer_g_lambda_out = self.last_layer_g_lambda.to(loss.device)
+
+        return loss, g_lambda_out, layer_g_lambda_out
         
