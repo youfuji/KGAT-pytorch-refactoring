@@ -44,7 +44,7 @@ class AKDN(nn.Module):
         
         # 1. KG Attention用パラメータ (Eq. 2)
         # W_k: (d || d) -> d  (連結を入力とする)
-        self.W_k = nn.Linear(self.embed_dim, self.relation_dim)
+        self.W_k = nn.Linear(self.embed_dim * 2, self.relation_dim)
         nn.init.xavier_uniform_(self.W_k.weight)
         
         # 2. Fusion Gate用パラメータ (Eq. 4)
@@ -182,14 +182,14 @@ class AKDN(nn.Module):
         r_embed = self.relation_embed(self.r_list)
         
         # 2. Attention Score (Eq. 2)
-        # alpha = LeakyReLU( W_k(e_t ⊙ e_h) * r ) -> sum
+        # alpha = LeakyReLU( W_k([e_t || e_h]) * r ) -> sum
         # Note: AKDNの実装において、Tailが近傍(neighbors)、Headが中心とする
         
-        # Element-wise Product: (n_edges, dim)
-        elem_embed = t_embed * h_embed
+        # Concatenate: (n_edges, 2 * dim)
+        cat_embed = torch.cat([t_embed, h_embed], dim=1)
         
         # Linear Transform: (n_edges, dim)
-        trans_embed = self.W_k(elem_embed)
+        trans_embed = self.W_k(cat_embed)
         
         # Interaction with Relation: (n_edges, dim) -> (n_edges, )
         attention_logits = torch.sum(trans_embed * r_embed, dim=1)
@@ -340,7 +340,7 @@ class AKDN(nn.Module):
             e_only_items_kg = e_items_kg[:self.n_items]
             e_only_items_collab = e_items_collab[:self.n_items]
             
-           # アイテムはKG表現とIG表現を融合
+            # アイテムはKG表現とIG表現を融合
             e_only_items_dual = self.fusion_gate(e_only_items_kg, e_only_items_collab)
             
             if self.mess_dropout[i] > 0.0:
